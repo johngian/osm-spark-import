@@ -1,7 +1,7 @@
 [project]
-name = "osm-hadoop"
+name = "osm-spark-import"
 version = "0.2.0"
-description = "OSM import pipeline on Hadoop/HDFS: pyosmium, Parquet, PostgreSQL"
+description = "OSM import pipeline with Spark: pyosmium, Iceberg/Parquet, PostgreSQL"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 # pyspark is installed by the image, in the version the cluster runs
@@ -22,16 +22,16 @@ test = ["pytest"]
 dev = ["black==24.10.0", "isort==5.13.2", "ruff==0.8.4"]
 
 [project.scripts]
-osm-hadoop = "osm_hadoop.cli:main"
-osm-hadoop-loader = "osm_hadoop.loader:main"
-osm-hadoop-compare = "osm_hadoop.compare:main"
+osm-spark-import = "osm_spark_import.cli:main"
+osm-spark-import-loader = "osm_spark_import.loader:main"
+osm-spark-import-compare = "osm_spark_import.compare:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["osm_hadoop", "osm_hadoop.mapping"]
+packages = ["osm_spark_import", "osm_spark_import.mapping"]
 
 [tool.black]
 line-length = 110
@@ -40,7 +40,7 @@ target-version = ["py311"]
 [tool.isort]
 profile = "black"
 line_length = 110
-known_first_party = ["osm_hadoop"]
+known_first_party = ["osm_spark_import"]
 
 [tool.ruff]
 line-length = 110

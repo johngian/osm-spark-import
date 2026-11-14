@@ -1,6 +1,6 @@
-"""The outbox: Parquet batches on HDFS, written by Spark, applied by the loader.
+"""The outbox: Parquet batches in storage, written by Spark, applied by the loader.
 
-    <OSM_HDFS_ROOT>/outbox/<namespace>/<batch, 12 digits>/
+    <OSM_STORAGE_ROOT>/outbox/<namespace>/<batch, 12 digits>/
         tables/<table>/*.parquet     rows to insert: osm_type, osm_id, columns..., geom (EWKB)
         deletes/*.parquet            delta only: (osm_type, osm_id) to delete from every table
         _manifest.json               written last: the batch is complete

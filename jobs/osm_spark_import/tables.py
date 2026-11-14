@@ -1,4 +1,4 @@
-"""The cache: Iceberg tables on HDFS, one namespace per import.
+"""The cache: Iceberg tables, one namespace per import.
 
     nodes(id, qlon, qlat, tags)          every node; coordinates as uint32 (mapping.geom)
     ways(id, tags, refs)                 every way

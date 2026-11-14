@@ -13,7 +13,7 @@ from osmium.replication.utils import get_replication_header
 
 from . import osm, outbox, pipeline, state, tables
 from .settings import Settings
-from .spark import HDFS, session
+from .spark import Storage, session
 
 
 def log(msg: str) -> None:
@@ -48,23 +48,23 @@ def pbf_state(s: Settings, pbf: str, sequence: int | None) -> tuple[int, str]:
     return sequence, ts.isoformat()
 
 
-def _begin(hdfs: HDFS, s: Settings, kind: str) -> tuple[dict, int, str]:
-    st = state.load(hdfs, s)
+def _begin(fs: Storage, s: Settings, kind: str) -> tuple[dict, int, str]:
+    st = state.load(fs, s)
     if st.get("current_run"):
         # a snapshot replaces everything an interrupted run left
         cr = st["current_run"]
         log(f"discarding the interrupted run {cr['kind']} batch {cr['batch']}")
-        hdfs.delete(cr["stage"])
-        hdfs.delete(outbox.batch_dir(s.outbox, cr["batch"]))
+        fs.delete(cr["stage"])
+        fs.delete(outbox.batch_dir(s.outbox, cr["batch"]))
     batch = st.get("batch", 0) + 1
-    stage = f"{s.hdfs_root}/staging/{s.namespace}-{batch}"
+    stage = f"{s.storage_root}/staging/{s.namespace}-{batch}"
     st["current_run"] = {"kind": kind, "batch": batch, "stage": stage}
-    state.save(hdfs, s, st)
+    state.save(fs, s, st)
     return st, batch, stage
 
 
 def _snapshot(
-    spark, hdfs: HDFS, s: Settings, mp, mapping_text: str, batch: int, stage: str, seq: int, osm_time: str
+    spark, fs: Storage, s: Settings, mp, mapping_text: str, batch: int, stage: str, seq: int, osm_time: str
 ):
     t = lambda name: spark.table(s.table(name))  # noqa: E731
     log("building rows")
@@ -72,7 +72,7 @@ def _snapshot(
     pipeline.build(spark, s, units, mapping_text).write.mode("overwrite").parquet(stage + "/rows")
     log(f"writing batch {batch}")
     manifest = pipeline.write_batch(
-        spark, hdfs, s, mp, batch, "snapshot", None, spark.read.parquet(stage + "/rows"), None, seq, osm_time
+        spark, fs, s, mp, batch, "snapshot", None, spark.read.parquet(stage + "/rows"), None, seq, osm_time
     )
     for name, n in manifest["rows"].items():
         log(f"  {name}: {n} rows")
@@ -85,16 +85,16 @@ def run_import(s: Settings, source: str, sequence: int | None = None) -> None:
     seq, osm_time = pbf_state(s, pbf, sequence)
     log(f"PBF data till {osm_time}, replication continues after sequence {seq}")
 
-    spark = session(f"osm-hadoop import {s.namespace}")
-    hdfs = HDFS(spark)
+    spark = session(f"osm-spark-import import {s.namespace}")
+    fs = Storage(spark)
     tables.ensure_namespace(spark, s)
-    st, batch, stage = _begin(hdfs, s, "snapshot")
+    st, batch, stage = _begin(fs, s, "snapshot")
 
     log("splitting the PBF")
     local = os.path.join(s.work_dir, f"chunks-{s.namespace}-{batch}")
     shutil.rmtree(local, ignore_errors=True)
     chunks = osm.split_pbf(pbf, local, s.chunk_mb << 20)
-    hdfs.put_files(chunks, stage + "/chunks")
+    fs.put_files(chunks, stage + "/chunks")
     shutil.rmtree(local)
     log(f"{len(chunks)} chunks")
 
@@ -104,7 +104,7 @@ def run_import(s: Settings, source: str, sequence: int | None = None) -> None:
     )
     tables.write_cache(s, spark.read.parquet(stage + "/elements"))
 
-    _snapshot(spark, hdfs, s, mp, mapping_text, batch, stage, seq, osm_time)
+    _snapshot(spark, fs, s, mp, mapping_text, batch, stage, seq, osm_time)
     st.update(
         batch=batch,
         sequence=seq,
@@ -112,23 +112,23 @@ def run_import(s: Settings, source: str, sequence: int | None = None) -> None:
         current_run=None,
         **{"import": {"batch": batch, "pbf": source, "sequence": seq, "time": osm_time}},
     )
-    state.save(hdfs, s, st)
-    hdfs.delete(stage)
+    state.save(fs, s, st)
+    fs.delete(stage)
     log("done")
 
 
 def rebuild(s: Settings) -> None:
     """A snapshot batch from the cache, e.g. after a mapping change."""
     mp, mapping_text = s.load_mapping()
-    spark = session(f"osm-hadoop rebuild {s.namespace}")
-    hdfs = HDFS(spark)
-    st = state.load(hdfs, s)
+    spark = session(f"osm-spark-import rebuild {s.namespace}")
+    fs = Storage(spark)
+    st = state.load(fs, s)
     if not st.get("batch"):
         raise SystemExit("nothing imported yet")
     seq, osm_time = st["sequence"], st.get("osm_time")
-    st, batch, stage = _begin(hdfs, s, "snapshot")
-    _snapshot(spark, hdfs, s, mp, mapping_text, batch, stage, seq, osm_time)
+    st, batch, stage = _begin(fs, s, "snapshot")
+    _snapshot(spark, fs, s, mp, mapping_text, batch, stage, seq, osm_time)
     st.update(batch=batch, current_run=None)
-    state.save(hdfs, s, st)
-    hdfs.delete(stage)
+    state.save(fs, s, st)
+    fs.delete(stage)
     log("done")

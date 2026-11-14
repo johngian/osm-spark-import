@@ -19,7 +19,7 @@ class Settings:
 
     # writer (Spark)
     catalog: str = "osm"
-    hdfs_root: str = "hdfs://namenode:8020/osm"
+    storage_root: str = "hdfs://namenode:8020/osm"
     buckets: int = 16
     partitions: int = 0  # 0: Spark's default parallelism
     chunk_mb: int = 32  # PBF chunk size: decoding runs one task per chunk
@@ -44,7 +44,7 @@ class Settings:
             namespace=_env("OSM_NAMESPACE", "osm"),
             srid=int(_env("OSM_SRID", "3857")),
             catalog=_env("OSM_CATALOG", "osm"),
-            hdfs_root=_env("OSM_HDFS_ROOT", cls.hdfs_root).rstrip("/"),
+            storage_root=_env("OSM_STORAGE_ROOT", cls.storage_root).rstrip("/"),
             buckets=int(_env("OSM_BUCKETS", "16")),
             partitions=int(_env("OSM_PARTITIONS", "0")),
             chunk_mb=int(_env("OSM_CHUNK_MB", "32")),
@@ -82,10 +82,10 @@ class Settings:
 
     @property
     def outbox(self) -> str:
-        """Outbox directory as a Hadoop URI (writer)."""
-        return f"{self.hdfs_root}/outbox/{self.namespace}"
+        """Outbox directory as a URI (writer)."""
+        return f"{self.storage_root}/outbox/{self.namespace}"
 
     @property
     def outbox_path(self) -> str:
-        """Outbox directory as a path on HDFS (loader, through WebHDFS)."""
-        return urlparse(self.hdfs_root).path.rstrip("/") + f"/outbox/{self.namespace}"
+        """Outbox directory as a path (loader, through WebHDFS)."""
+        return urlparse(self.storage_root).path.rstrip("/") + f"/outbox/{self.namespace}"

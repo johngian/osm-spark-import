@@ -5,9 +5,9 @@ import osmium
 import pyarrow as pa
 import shapely
 
-from osm_hadoop import osm
-from osm_hadoop.mapping import config, geom
-from osm_hadoop.mapping.writer import Builder, Mapping
+from osm_spark_import import osm
+from osm_spark_import.mapping import config, geom
+from osm_spark_import.mapping.writer import Builder, Mapping
 
 DEFAULT_MAPPING = os.path.join(os.path.dirname(__file__), "..", "..", "mappings", "default.yml")
 if not os.path.exists(DEFAULT_MAPPING):  # in the image: copied next to the tests

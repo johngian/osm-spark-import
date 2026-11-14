@@ -1,6 +1,6 @@
-"""osm-hadoop-compare: compare the tables of two schemas.
+"""osm-spark-import-compare: compare the tables of two schemas.
 
-    osm-hadoop-compare A B [--samples N]
+    osm-spark-import-compare A B [--samples N]
 
 First exactly (every column as text, geometries as EWKB, as multisets,
 without the serial id column). Rows that differ are then paired by their
@@ -144,7 +144,7 @@ def compare(a: str, b: str, samples: int = 5) -> bool:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="osm-hadoop-compare", description=__doc__.split("\n\n")[0])
+    p = argparse.ArgumentParser(prog="osm-spark-import-compare", description=__doc__.split("\n\n")[0])
     p.add_argument("a")
     p.add_argument("b")
     p.add_argument("--samples", type=int, default=5)

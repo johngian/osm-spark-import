@@ -1,11 +1,11 @@
-osm-hadoop-import
+osm-spark-import
 
 Influenced by imposm3 (https://github.com/omniscale/imposm3), written and
 maintained by Omniscale (see imposm3's AUTHORS), licensed under the Apache
 License 2.0 (LICENSE).
 
 Derived from imposm3:
-- jobs/osm_hadoop/mapping/: mapping, geometry, tile expiry and PostGIS logic,
+- jobs/osm_spark_import/mapping/: mapping, geometry, tile expiry and PostGIS logic,
   translated to Python and modified.
 - jobs/tests/test_mapping_*.py: test cases ported from imposm3's tests.
 - jobs/tests/data/test_mapping.yml: copied from imposm3.

@@ -1,11 +1,11 @@
-"""osm-hadoop-loader: applies outbox batches to PostgreSQL.
+"""osm-spark-import-loader: applies outbox batches to PostgreSQL.
 
 A standalone process (no Spark, no JVM): it reads the outbox over WebHDFS
 (fsspec + pyarrow) and writes with COPY (psycopg). The database connection
 comes from libpq's PG* environment variables. The SQL comes from
 mapping.postgis.
 
-    osm-hadoop-loader [apply] [--loop]   apply new batches:
+    osm-spark-import-loader [apply] [--loop]   apply new batches:
         snapshot -> schema import: create the tables, COPY, generalized
                     tables, indexes. Not deployed.
         delta    -> production schema, in one transaction: delete the
@@ -13,12 +13,12 @@ mapping.postgis.
                     the new rows, update the generalized tables. Expired
                     tiles are written to OSM_EXPIRE_DIR first. Deltas wait
                     until their snapshot is deployed.
-    osm-hadoop-loader deploy         import -> production -> backup
-    osm-hadoop-loader revert-deploy  backup -> production -> import
-    osm-hadoop-loader remove-backup  drop the backup tables
-    osm-hadoop-loader status
+    osm-spark-import-loader deploy         import -> production -> backup
+    osm-spark-import-loader revert-deploy  backup -> production -> import
+    osm-spark-import-loader remove-backup  drop the backup tables
+    osm-spark-import-loader status
 
-State: osm_hadoop.loader_state, one row per namespace: which batch is in the
+State: osm_spark_import.loader_state, one row per namespace: which batch is in the
 import, production and backup schemas, written in the same transaction as
 the data.
 """
@@ -46,7 +46,7 @@ from .mapping.writer import REL_ID_OFFSET
 from .settings import Settings
 
 COPY_BATCH = 50_000
-STATE = "osm_hadoop.loader_state"
+STATE = "osm_spark_import.loader_state"
 
 
 def log(msg: str) -> None:
@@ -155,7 +155,7 @@ class Loader:
         self.ob = Outbox(s)
         self.conn = psycopg.connect(autocommit=True)
         with self.conn.cursor() as cur:
-            cur.execute("CREATE SCHEMA IF NOT EXISTS osm_hadoop")
+            cur.execute("CREATE SCHEMA IF NOT EXISTS osm_spark_import")
             cur.execute(
                 f"""CREATE TABLE IF NOT EXISTS {STATE} (
                     namespace text PRIMARY KEY,
@@ -171,7 +171,7 @@ class Loader:
         """One applying loader per namespace (held for the process lifetime)."""
         with self.conn.cursor() as cur:
             cur.execute(
-                "SELECT pg_try_advisory_lock(hashtext('osm-hadoop-loader:' || %s))", (self.s.namespace,)
+                "SELECT pg_try_advisory_lock(hashtext('osm-spark-import-loader:' || %s))", (self.s.namespace,)
             )
             if not cur.fetchone()[0]:
                 raise SystemExit(f"another loader is applying batches for namespace {self.s.namespace}")
@@ -184,13 +184,15 @@ class Loader:
             def __enter__(self):
                 with loader.conn.cursor() as cur:
                     cur.execute(
-                        "SELECT pg_advisory_lock(hashtext('osm-hadoop-work:' || %s))", (loader.s.namespace,)
+                        "SELECT pg_advisory_lock(hashtext('osm-spark-import-work:' || %s))",
+                        (loader.s.namespace,),
                     )
 
             def __exit__(self, *exc):
                 with loader.conn.cursor() as cur:
                     cur.execute(
-                        "SELECT pg_advisory_unlock(hashtext('osm-hadoop-work:' || %s))", (loader.s.namespace,)
+                        "SELECT pg_advisory_unlock(hashtext('osm-spark-import-work:' || %s))",
+                        (loader.s.namespace,),
                     )
 
         return _Lock()
@@ -312,7 +314,7 @@ class Loader:
         if current.get("tables") != m["tables"] or current.get("generalized") != m.get("generalized"):
             raise SystemExit(
                 f"batch {b} has other tables than schema {prod} (mapping changed?): "
-                "run `osm-hadoop rebuild` and deploy the new snapshot"
+                "run `osm-spark-import rebuild` and deploy the new snapshot"
             )
         t0 = time.time()
         gen = P.Generalized(m["tables"], m.get("generalized") or {})
@@ -439,7 +441,7 @@ class Loader:
 
 
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(prog="osm-hadoop-loader", description=__doc__.split("\n\n")[0])
+    p = argparse.ArgumentParser(prog="osm-spark-import-loader", description=__doc__.split("\n\n")[0])
     p.add_argument(
         "command",
         nargs="?",

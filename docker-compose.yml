@@ -3,16 +3,16 @@
 # Spark jobs.
 #
 #   docker compose up -d --build
-#   docker compose run --rm client osm-hadoop import https://download.geofabrik.de/europe/andorra-latest.osm.pbf
+#   docker compose run --rm client osm-spark-import import https://download.geofabrik.de/europe/andorra-latest.osm.pbf
 #   docker compose logs -f loader                          # snapshot -> schema import
-#   docker compose run --rm client osm-hadoop-loader deploy  # import -> public -> backup
-#   docker compose run --rm client osm-hadoop run           # diffs; the loader applies them to public
+#   docker compose run --rm client osm-spark-import-loader deploy  # import -> public -> backup
+#   docker compose run --rm client osm-spark-import run           # diffs; the loader applies them to public
 #
 # UIs: HDFS http://localhost:9870, Spark http://localhost:18080 (SPARK_UI_PORT)
-name: osm-hadoop
+name: osm-spark-import
 
 x-spark: &spark
-  image: osm-hadoop/spark:dev
+  image: osm-spark-import/spark:dev
   build:
     context: .
     dockerfile: docker/spark/Dockerfile
@@ -33,8 +33,8 @@ x-env: &env
 
 services:
   namenode:
-    image: osm-hadoop/hadoop:dev
-    build: docker/hadoop
+    image: osm-spark-import/hdfs:dev
+    build: docker/hdfs
     command: namenode
     hostname: namenode
     ports: ["9870:9870"]
@@ -45,7 +45,7 @@ services:
       retries: 12
 
   datanode:
-    image: osm-hadoop/hadoop:dev
+    image: osm-spark-import/hdfs:dev
     command: datanode
     hostname: datanode
     volumes: ["hdfs-data:/hadoop/dfs/data"]
@@ -69,7 +69,7 @@ services:
     depends_on: [spark-master, datanode]
 
   postgis:
-    image: osm-hadoop/postgis:dev
+    image: osm-spark-import/postgis:dev
     build: docker/postgis
     environment:
       POSTGRES_USER: osm
@@ -86,7 +86,7 @@ services:
   # Applies the outbox batches to PostgreSQL as they appear.
   loader:
     <<: *spark
-    command: osm-hadoop-loader apply --loop --interval 10
+    command: osm-spark-import-loader apply --loop --interval 10
     environment: *env
     volumes: ["./data:/data"]
     restart: unless-stopped
@@ -94,7 +94,7 @@ services:
       postgis: { condition: service_healthy }
       datanode: { condition: service_started }
 
-  # Runs the Spark jobs: docker compose run --rm client osm-hadoop ...
+  # Runs the Spark jobs: docker compose run --rm client osm-spark-import ...
   client:
     <<: *spark
     profiles: [client]

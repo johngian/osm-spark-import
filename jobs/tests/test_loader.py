@@ -4,9 +4,9 @@ import io
 import pyarrow as pa
 from test_osm import DEFAULT_MAPPING
 
-from osm_hadoop.loader import _csv, id_expr, table_names
-from osm_hadoop.mapping import config, postgis
-from osm_hadoop.mapping.writer import Mapping
+from osm_spark_import.loader import _csv, id_expr, table_names
+from osm_spark_import.mapping import config, postgis
+from osm_spark_import.mapping.writer import Mapping
 
 
 def test_csv_for_copy():

@@ -5,7 +5,7 @@ import re
 
 import pytest
 
-from osm_hadoop.mapping.expire import TileList
+from osm_spark_import.mapping.expire import TileList
 
 
 @pytest.mark.parametrize(

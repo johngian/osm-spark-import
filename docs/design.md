@@ -1,4 +1,4 @@
-# osm-hadoop-import: design
+# osm-spark-import: design
 
 Status: implemented for local development, 2026-11-14 (§6).
 
@@ -6,8 +6,8 @@ Status: implemented for local development, 2026-11-14 (§6).
 
 Load OpenStreetMap into PostgreSQL/PostGIS — tables defined by a mapping
 file, generalized tables, an import/production/backup schema rotation,
-replication diffs and expired tiles — with Hadoop doing the heavy work:
-pyosmium for parsing, Iceberg and Parquet on HDFS for the cache and the
+replication diffs and expired tiles — with Spark doing the heavy work:
+pyosmium for parsing, Iceberg and Parquet in shared storage for the cache and the
 intermediate output, and a loader that streams batches into PostgreSQL.
 
 ## 2. Architecture
@@ -16,9 +16,9 @@ intermediate output, and a loader that streams batches into PostgreSQL.
 flowchart TB
     pbf[(PBF)] --> w
     repl[(Diffs)] --> w
-    w[Writer<br/>osm-hadoop, Spark] <--> h[(HDFS<br/>cache, state)]
+    w[Writer<br/>osm-spark-import, Spark] <--> h[(Storage<br/>cache, state)]
     w --> o[(Outbox<br/>Parquet batches)]
-    o --> l[Loader<br/>osm-hadoop-loader]
+    o --> l[Loader<br/>osm-spark-import-loader]
     l --> pg[(PostGIS)]
     l --> t[(Expire files)]
 ```
@@ -28,7 +28,7 @@ the database, the loader never runs Spark.
 
 ## 3. The mapping engine
 
-`osm_hadoop.mapping` turns elements into rows; the format is described in
+`osm_spark_import.mapping` turns elements into rows; the format is described in
 [mapping.md](mapping.md).
 
 | Module | |
@@ -65,7 +65,7 @@ Rules that decide the output:
 
 ```mermaid
 flowchart TB
-    a[PBF] -->|split| b[Chunks on HDFS]
+    a[PBF] -->|split| b[Chunks in storage]
     b -->|pyosmium| c[(Cache tables)]
     c -->|joins| d[Work units]
     d -->|mapping engine| e[(Snapshot batch)]
@@ -99,7 +99,7 @@ new versions are expired if they were written.
 ### Batches
 
 ```
-<OSM_HDFS_ROOT>/outbox/<namespace>/<batch, 12 digits>/
+<OSM_STORAGE_ROOT>/outbox/<namespace>/<batch, 12 digits>/
     tables/<table>/*.parquet   columns in mapping order, + __id, __gen
     deletes/*.parquet          delta: (kind n/w/r, OSM ID)
     tiles/*.parquet            delta: expired tiles z/x/y
@@ -138,17 +138,17 @@ stateDiagram-v2
 | Check | Result |
 |---|---|
 | unit tests (mapping file, filters, matchers, columns, geometries, multipolygons, ring merging, tile lists, PBF splitting, SQL, CSV) | 196 pass |
-| Andorra 2026-11-10 imported, diffs 4964–4967 applied, compared with Andorra 2026-11-13 imported (`osm-hadoop-compare`) | all 16 tables of the default mapping identical |
+| Andorra 2026-11-10 imported, diffs 4964–4967 applied, compared with Andorra 2026-11-13 imported (`osm-spark-import-compare`) | all 16 tables of the default mapping identical |
 | a diff run killed while merging the cache, then run again | rolled back and redone; same tables |
 | Luxembourg import (1.3 M rows, default mapping) | completes; 78 s on the local cluster |
 
 ```sh
 CHK="-e OSM_NAMESPACE=check -e OSM_SCHEMA=check -e OSM_SCHEMA_IMPORT=check_import -e OSM_SCHEMA_BACKUP=check_backup"
-docker compose run --rm client osm-hadoop import /data/work/downloads/andorra-261110.osm.pbf
-docker compose run --rm client osm-hadoop-loader deploy
-docker compose run --rm client osm-hadoop run --until 4967
-docker compose run --rm $CHK client sh -c 'osm-hadoop import /data/work/downloads/andorra-261113.osm.pbf && osm-hadoop-loader apply'
-docker compose run --rm client osm-hadoop-compare public check_import
+docker compose run --rm client osm-spark-import import /data/work/downloads/andorra-261110.osm.pbf
+docker compose run --rm client osm-spark-import-loader deploy
+docker compose run --rm client osm-spark-import run --until 4967
+docker compose run --rm $CHK client sh -c 'osm-spark-import import /data/work/downloads/andorra-261113.osm.pbf && osm-spark-import-loader apply'
+docker compose run --rm client osm-spark-import-compare public check_import
 ```
 
 ## 7. Scaling

@@ -1,5 +1,5 @@
 # Spark (standalone master, workers, the job driver) with Iceberg, pyosmium,
-# and the osm-hadoop package; the same image runs the loader.
+# and the osm-spark-import package; the same image runs the loader.
 FROM python:3.11-slim-bookworm
 ARG SPARK_VERSION=3.5.3
 ARG ICEBERG_VERSION=1.6.1
@@ -17,7 +17,7 @@ ENV PATH=$SPARK_HOME/bin:$PATH
 RUN curl -fsSL -o "$SPARK_HOME/jars/iceberg-spark-runtime-3.5_2.12-${ICEBERG_VERSION}.jar" \
       "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/${ICEBERG_VERSION}/iceberg-spark-runtime-3.5_2.12-${ICEBERG_VERSION}.jar"
 COPY docker/spark/spark-defaults.conf docker/spark/log4j2.properties /etc/spark/
-COPY jobs /opt/osm-hadoop/jobs
-RUN pip install --no-cache-dir "/opt/osm-hadoop/jobs[test]" \
- && cd /opt/osm-hadoop/jobs && python -m pytest -q tests
+COPY jobs /opt/osm-spark-import/jobs
+RUN pip install --no-cache-dir "/opt/osm-spark-import/jobs[test]" \
+ && cd /opt/osm-spark-import/jobs && python -m pytest -q tests
 WORKDIR /data

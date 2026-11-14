@@ -1,4 +1,4 @@
-"""Writer state on HDFS, one JSON file per namespace.
+"""Writer state in storage, one JSON file per namespace.
 
     batch         the last complete outbox batch; the cache matches it
     sequence      the replication sequence of the cache
@@ -10,16 +10,16 @@
 from __future__ import annotations
 
 from .settings import Settings
-from .spark import HDFS
+from .spark import Storage
 
 
 def path(s: Settings) -> str:
-    return f"{s.hdfs_root}/state/{s.namespace}.json"
+    return f"{s.storage_root}/state/{s.namespace}.json"
 
 
-def load(hdfs: HDFS, s: Settings) -> dict:
-    return hdfs.read_json(path(s)) or {}
+def load(fs: Storage, s: Settings) -> dict:
+    return fs.read_json(path(s)) or {}
 
 
-def save(hdfs: HDFS, s: Settings, st: dict) -> None:
-    hdfs.write_json(path(s), st)
+def save(fs: Storage, s: Settings, st: dict) -> None:
+    fs.write_json(path(s), st)

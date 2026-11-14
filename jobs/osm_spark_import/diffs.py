@@ -37,7 +37,7 @@ from . import outbox, pipeline, state, tables
 from .imports import download, log
 from .mapping import geom as igeom
 from .settings import Settings
-from .spark import HDFS, session
+from .spark import Storage, session
 
 CHANGE = pa.schema(
     [
@@ -98,21 +98,21 @@ def decode_osc(path: str, seq: int, out: str) -> None:
 
 def run(s: Settings, loop: bool = False, max_diffs: int | None = None, until: int | None = None) -> None:
     s.check_mapping()
-    spark = session(f"osm-hadoop run {s.namespace}")
+    spark = session(f"osm-spark-import run {s.namespace}")
     # Dynamic partition pruning fails on some of these plans over Iceberg
     # snapshots ("dynamicpruning ... has not finished", Spark 3.5).
     spark.conf.set("spark.sql.optimizer.dynamicPartitionPruning.enabled", "false")
-    hdfs = HDFS(spark)
+    fs = Storage(spark)
     server = ReplicationServer(s.replication_url)
     max_diffs = max_diffs or s.max_diffs
 
     while True:
-        st = state.load(hdfs, s)
+        st = state.load(fs, s)
         if st.get("current_run"):
-            recover(spark, hdfs, s, st)
-            st = state.load(hdfs, s)
+            recover(spark, fs, s, st)
+            st = state.load(fs, s)
         if not st.get("batch"):
-            raise SystemExit("nothing imported yet: run `osm-hadoop import` first")
+            raise SystemExit("nothing imported yet: run `osm-spark-import import` first")
         info = server.get_state_info()
         if info is None:
             raise SystemExit(f"cannot read the replication state of {s.replication_url}")
@@ -124,15 +124,15 @@ def run(s: Settings, loop: bool = False, max_diffs: int | None = None, until: in
             time.sleep(60)
             continue
         seqs = list(range(st["sequence"] + 1, min(latest, st["sequence"] + max_diffs) + 1))
-        apply_batch(spark, hdfs, s, st, server, seqs)
+        apply_batch(spark, fs, s, st, server, seqs)
         if not loop and seqs[-1] >= latest:
             return
 
 
-def apply_batch(spark: SparkSession, hdfs: HDFS, s: Settings, st: dict, server, seqs: list[int]) -> None:
+def apply_batch(spark: SparkSession, fs: Storage, s: Settings, st: dict, server, seqs: list[int]) -> None:
     mp, mapping_text = s.load_mapping()
     batch = st["batch"] + 1
-    stage = f"{s.hdfs_root}/staging/{s.namespace}-{batch}"
+    stage = f"{s.storage_root}/staging/{s.namespace}-{batch}"
     log(f"batch {batch}: sequences {seqs[0]}..{seqs[-1]}")
 
     # 1. fetch
@@ -151,7 +151,7 @@ def apply_batch(spark: SparkSession, hdfs: HDFS, s: Settings, st: dict, server, 
         out = osc[: -len(".osc.gz")] + ".changes.parquet"
         decode_osc(osc, seq, out)
         local.append(out)
-    hdfs.put_files(local, stage + "/changes")
+    fs.put_files(local, stage + "/changes")
 
     # 2. collapse
     last = Window.partitionBy("k", "id").orderBy(F.desc("version"), F.desc("seq"), F.desc("pos"))
@@ -175,7 +175,7 @@ def apply_batch(spark: SparkSession, hdfs: HDFS, s: Settings, st: dict, server, 
         "seqs": seqs,
         "time": osm_time,
     }
-    state.save(hdfs, s, st)
+    state.save(fs, s, st)
     old = {name: tables.at_snapshot(spark, s, name, snaps[name]) for name in tables.CACHE_TABLES}
 
     # 3. affected
@@ -242,36 +242,36 @@ def apply_batch(spark: SparkSession, hdfs: HDFS, s: Settings, st: dict, server, 
     )
     rows = spark.read.parquet(stage + "/rows").unionByName(spark.read.parquet(stage + "/old"))
     manifest = pipeline.write_batch(
-        spark, hdfs, s, mp, batch, "delta", st["batch"], rows, deletes, seqs[-1], osm_time
+        spark, fs, s, mp, batch, "delta", st["batch"], rows, deletes, seqs[-1], osm_time
     )
     log(
         f"batch {batch}: {manifest['deletes']} elements to delete, {sum(manifest['rows'].values())} rows "
         f"to insert, {manifest['tiles']} tiles to expire"
     )
-    finish(hdfs, s, st)
+    finish(fs, s, st)
 
 
-def finish(hdfs: HDFS, s: Settings, st: dict) -> None:
+def finish(fs: Storage, s: Settings, st: dict) -> None:
     cr = st["current_run"]
     st.update(batch=cr["batch"], sequence=cr["seqs"][-1], osm_time=cr["time"], current_run=None)
-    state.save(hdfs, s, st)
-    hdfs.delete(cr["stage"])
+    state.save(fs, s, st)
+    fs.delete(cr["stage"])
 
 
-def recover(spark: SparkSession, hdfs: HDFS, s: Settings, st: dict) -> None:
+def recover(spark: SparkSession, fs: Storage, s: Settings, st: dict) -> None:
     cr = st["current_run"]
     if cr["kind"] != "delta":
-        raise SystemExit("an import was interrupted: run `osm-hadoop import` (or `rebuild`) again")
-    if hdfs.exists(f"{outbox.batch_dir(s.outbox, cr['batch'])}/{outbox.MANIFEST}"):
+        raise SystemExit("an import was interrupted: run `osm-spark-import import` (or `rebuild`) again")
+    if fs.exists(f"{outbox.batch_dir(s.outbox, cr['batch'])}/{outbox.MANIFEST}"):
         log(f"batch {cr['batch']} was complete; finishing it")
-        finish(hdfs, s, st)
+        finish(fs, s, st)
         return
     log(f"batch {cr['batch']} was interrupted; rolling back the cache")
     tables.rollback(spark, s, cr["snapshots"])
-    hdfs.delete(outbox.batch_dir(s.outbox, cr["batch"]))
-    hdfs.delete(cr["stage"])
+    fs.delete(outbox.batch_dir(s.outbox, cr["batch"]))
+    fs.delete(cr["stage"])
     st["current_run"] = None
-    state.save(hdfs, s, st)
+    state.save(fs, s, st)
 
 
 def _pair_delta(old_pairs: DataFrame, new_pairs: DataFrame, keys: list[str]) -> DataFrame:

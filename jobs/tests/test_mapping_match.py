@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from osm_hadoop.mapping import config
-from osm_hadoop.mapping.match import matchers
-from osm_hadoop.mapping.tags import ExcludeFilter, node_filter, relation_filter, way_filter
+from osm_spark_import.mapping import config
+from osm_spark_import.mapping.match import matchers
+from osm_spark_import.mapping.tags import ExcludeFilter, node_filter, relation_filter, way_filter
 
 DATA = Path(__file__).parent / "data"
 

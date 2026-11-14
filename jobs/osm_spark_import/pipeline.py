@@ -10,7 +10,7 @@ from pyspark.sql.types import StructField, StructType, _parse_datatype_string
 
 from . import osm, outbox
 from .settings import Settings
-from .spark import HDFS
+from .spark import Storage
 
 CHUNK_MB = 32  # default; OSM_CHUNK_MB
 ELEMENT_SCHEMA = (
@@ -25,7 +25,7 @@ def partitions(spark: SparkSession, s: Settings) -> int:
 
 
 def decode_pbf_chunks(spark: SparkSession, chunks_dir: str, chunk_mb: int = CHUNK_MB) -> DataFrame:
-    """Decode the PBF chunks in an HDFS directory with pyosmium, one chunk per task."""
+    """Decode the PBF chunks in a storage directory with pyosmium, one chunk per task."""
     size = str((chunk_mb + 8) << 20)
     spark.conf.set("spark.sql.files.maxPartitionBytes", size)
     spark.conf.set("spark.sql.files.openCostInBytes", size)
@@ -206,7 +206,7 @@ def table_schema(spec: dict) -> StructType:
 
 def write_batch(
     spark: SparkSession,
-    hdfs: HDFS,
+    fs: Storage,
     s: Settings,
     mp,
     batch: int,
@@ -221,7 +221,7 @@ def write_batch(
     plus __id and __gen for the generalized tables), deletes, expired tiles,
     then the manifest. rows should be materialized: it is read per table."""
     path = outbox.batch_dir(s.outbox, batch)
-    hdfs.delete(path)
+    fs.delete(path)
     spec = mp.manifest()
     counts = {}
     for name, t in spec["tables"].items():
@@ -260,5 +260,5 @@ def write_batch(
         "rows": counts,
         **spec,
     }
-    hdfs.write_json(f"{path}/{outbox.MANIFEST}", manifest)
+    fs.write_json(f"{path}/{outbox.MANIFEST}", manifest)
     return manifest

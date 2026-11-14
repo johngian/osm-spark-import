@@ -1,4 +1,4 @@
-"""osm-hadoop: the writer (Spark). Settings come from the environment."""
+"""osm-spark-import: the writer (Spark). Settings come from the environment."""
 
 from __future__ import annotations
 
@@ -10,16 +10,16 @@ from .settings import Settings
 
 def status(s: Settings) -> None:
     from . import outbox, state, tables
-    from .spark import HDFS, session
+    from .spark import Storage, session
 
-    spark = session("osm-hadoop status")
-    hdfs = HDFS(spark)
-    st = state.load(hdfs, s)
+    spark = session("osm-spark-import status")
+    fs = Storage(spark)
+    st = state.load(fs, s)
     batch = st.get("batch")
     out = {
         "state": st,
         "last_batch": (
-            hdfs.read_json(f"{outbox.batch_dir(s.outbox, batch)}/{outbox.MANIFEST}") if batch else None
+            fs.read_json(f"{outbox.batch_dir(s.outbox, batch)}/{outbox.MANIFEST}") if batch else None
         ),
         "cache": {
             name: spark.table(s.table(name)).count()
@@ -31,7 +31,7 @@ def status(s: Settings) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(prog="osm-hadoop", description=__doc__)
+    p = argparse.ArgumentParser(prog="osm-spark-import", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
     imp = sub.add_parser("import", help="PBF (path or URL) -> cache -> snapshot batch")
     imp.add_argument("pbf")

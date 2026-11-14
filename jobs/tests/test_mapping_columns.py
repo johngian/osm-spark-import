@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 import shapely
 
-from osm_hadoop.mapping.columns import Ctx, column_spec
-from osm_hadoop.mapping.config import Column
+from osm_spark_import.mapping.columns import Ctx, column_spec
+from osm_spark_import.mapping.config import Column
 
 
 def ctx(tags=None, match_value="", geom=None):

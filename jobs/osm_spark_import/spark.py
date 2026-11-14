@@ -1,4 +1,4 @@
-"""Spark session and small HDFS file operations on the driver."""
+"""Spark session and small storage file operations on the driver."""
 
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ def session(app: str) -> SparkSession:
     )
 
 
-class HDFS:
-    """File operations through the driver's Hadoop FileSystem."""
+class Storage:
+    """File operations through Spark's FileSystem API (hdfs://, s3a://, file://)."""
 
     def __init__(self, spark: SparkSession):
         self.jvm = spark._jvm

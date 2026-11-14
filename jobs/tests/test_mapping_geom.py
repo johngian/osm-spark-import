@@ -10,7 +10,7 @@ import itertools
 import pytest
 import shapely
 
-from osm_hadoop.mapping.geom import GeomError, Ring, build_rings, merge_rings, multipolygon
+from osm_spark_import.mapping.geom import GeomError, Ring, build_rings, merge_rings, multipolygon
 
 MAX_GAP = 0.1
 
