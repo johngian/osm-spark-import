@@ -40,10 +40,10 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 
-from . import outbox
-from .mapping import postgis as P
-from .mapping.writer import REL_ID_OFFSET
-from .settings import Settings
+from osm_spark_import import outbox
+from osm_spark_import.mapping import postgis as P
+from osm_spark_import.mapping.writer import REL_ID_OFFSET
+from osm_spark_import.settings import Settings
 
 COPY_BATCH = 50_000
 STATE = "osm_spark_import.loader_state"
@@ -93,7 +93,7 @@ class Outbox:
             yield from pq.ParquetFile(f).iter_batches(batch_size=COPY_BATCH, columns=columns)
 
 
-def _csv(batch: pa.RecordBatch, geometry: set[str]) -> bytes:
+def to_csv(batch: pa.RecordBatch, geometry: set[str]) -> bytes:
     """A record batch as CSV for COPY: geometries as hex EWKB."""
     for name in geometry & set(batch.schema.names):
         i = batch.schema.get_field_index(name)
@@ -116,7 +116,7 @@ def copy_file(
     n = 0
     with cur.copy(stmt) as cp:
         for b in ob.read(path, columns):
-            cp.write(_csv(b, geometry))
+            cp.write(to_csv(b, geometry))
             n += b.num_rows
     return n
 
@@ -180,7 +180,7 @@ class Loader:
         """Serializes applying a batch with deploy/revert/remove-backup."""
         loader = self
 
-        class _Lock:
+        class Lock:
             def __enter__(self):
                 with loader.conn.cursor() as cur:
                     cur.execute(
@@ -195,7 +195,7 @@ class Loader:
                         (loader.s.namespace,),
                     )
 
-        return _Lock()
+        return Lock()
 
     def state(self, cur=None) -> dict:
         cur = cur or self.conn.cursor()
@@ -216,7 +216,7 @@ class Loader:
         )
         return dict(zip(keys, cur.fetchone(), strict=False))
 
-    def _set(self, cur, **values) -> None:
+    def save_state(self, cur, **values) -> None:
         cols = ", ".join(f"{k} = %s" for k in values)
         params = [
             json.dumps(v) if k.endswith("_manifest") and v is not None else v for k, v in values.items()
@@ -229,9 +229,9 @@ class Loader:
 
     def step(self) -> bool:
         with self.work_lock():
-            return self._step()
+            return self.apply_next()
 
-    def _step(self) -> bool:
+    def apply_next(self) -> bool:
         st = self.state()
         seen = max(st["import_batch"] or 0, st["production_batch"] or 0)
         manifests = []
@@ -304,7 +304,7 @@ class Loader:
             jobs += [P.index_sqls(imp, n, m["tables"][gen.root(n)]["columns"], True) for n in gen.order()]
             list(pool.map(run, jobs))
         with self.conn.transaction(), self.conn.cursor() as cur:
-            self._set(cur, import_batch=b, import_manifest=m)
+            self.save_state(cur, import_batch=b, import_manifest=m)
         log(f"batch {b}: {sum(counts.values())} rows in {time.time() - t0:.1f}s; deploy to make it live")
 
     def apply_delta(self, m: dict, st: dict) -> None:
@@ -361,7 +361,7 @@ class Loader:
                 ids = gen_ids.get(gn)
                 if ids:
                     cur.executemany(gen.insert_sql(prod, gn), [(i,) for i in ids])
-            self._set(
+            self.save_state(
                 cur, production_batch=b, production_manifest=m, sequence=m["sequence"], osm_time=m["osm_time"]
             )
         log(
@@ -370,7 +370,7 @@ class Loader:
 
     # --- deploy / revert-deploy / remove-backup ------------------------------------
 
-    def _rotate(self, source: str, dest: str, backup: str, names: list[str]) -> None:
+    def rotate_tables(self, source: str, dest: str, backup: str, names: list[str]) -> None:
         with self.conn.transaction(), self.conn.cursor() as cur:
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {P.q(dest)}")
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {P.q(backup)}")
@@ -385,12 +385,12 @@ class Loader:
                     cur.execute(f"ALTER TABLE {P.q(dest)}.{P.q(name)} SET SCHEMA {P.q(backup)}")
                 cur.execute(f"ALTER TABLE {P.q(source)}.{P.q(name)} SET SCHEMA {P.q(dest)}")
                 log(f"rotated {name}: {source} -> {dest} -> {backup}")
-            self._after_rotate(cur, self.state(cur), source, dest)
+            self.after_rotate(cur, self.state(cur), source, dest)
 
-    def _after_rotate(self, cur, st, source, dest):
+    def after_rotate(self, cur, st, source, dest):
         s = self.s
         if source == s.schema_import:  # deploy
-            self._set(
+            self.save_state(
                 cur,
                 backup_batch=st["production_batch"],
                 backup_manifest=st["production_manifest"],
@@ -402,7 +402,7 @@ class Loader:
                 osm_time=(st["import_manifest"] or {}).get("osm_time"),
             )
         else:  # revert
-            self._set(
+            self.save_state(
                 cur,
                 import_batch=st["production_batch"],
                 import_manifest=st["production_manifest"],
@@ -418,7 +418,7 @@ class Loader:
         st = self.state()
         if st["import_manifest"] is None:
             raise SystemExit(f"nothing in schema {self.s.schema_import} to deploy")
-        self._rotate(
+        self.rotate_tables(
             self.s.schema_import, self.s.schema, self.s.schema_backup, table_names(st["import_manifest"])
         )
 
@@ -427,7 +427,7 @@ class Loader:
         m = st["backup_manifest"] or st["production_manifest"]
         if m is None:
             raise SystemExit("nothing deployed")
-        self._rotate(self.s.schema_backup, self.s.schema, self.s.schema_import, table_names(m))
+        self.rotate_tables(self.s.schema_backup, self.s.schema, self.s.schema_import, table_names(m))
 
     def remove_backup(self) -> None:
         st = self.state()
@@ -437,7 +437,7 @@ class Loader:
         with self.conn.transaction(), self.conn.cursor() as cur:
             for name in table_names(m):
                 cur.execute(f"DROP TABLE IF EXISTS {P.q(self.s.schema_backup)}.{P.q(name)}")
-            self._set(cur, backup_batch=None, backup_manifest=None)
+            self.save_state(cur, backup_batch=None, backup_manifest=None)
 
 
 def main(argv: list[str] | None = None) -> None:

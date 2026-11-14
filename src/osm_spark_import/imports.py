@@ -11,9 +11,9 @@ import osmium
 from osmium.replication.server import ReplicationServer
 from osmium.replication.utils import get_replication_header
 
-from . import osm, outbox, pipeline, state, tables
-from .settings import Settings
-from .spark import Storage, session
+from osm_spark_import import osm, outbox, pipeline, state, tables
+from osm_spark_import.settings import Settings
+from osm_spark_import.spark import Storage, session
 
 
 def log(msg: str) -> None:
@@ -48,7 +48,7 @@ def pbf_state(s: Settings, pbf: str, sequence: int | None) -> tuple[int, str]:
     return sequence, ts.isoformat()
 
 
-def _begin(fs: Storage, s: Settings, kind: str) -> tuple[dict, int, str]:
+def begin_run(fs: Storage, s: Settings, kind: str) -> tuple[dict, int, str]:
     st = state.load(fs, s)
     if st.get("current_run"):
         # a snapshot replaces everything an interrupted run left
@@ -63,7 +63,7 @@ def _begin(fs: Storage, s: Settings, kind: str) -> tuple[dict, int, str]:
     return st, batch, stage
 
 
-def _snapshot(
+def write_snapshot(
     spark, fs: Storage, s: Settings, mp, mapping_text: str, batch: int, stage: str, seq: int, osm_time: str
 ):
     t = lambda name: spark.table(s.table(name))  # noqa: E731
@@ -88,7 +88,7 @@ def run_import(s: Settings, source: str, sequence: int | None = None) -> None:
     spark = session(f"osm-spark-import import {s.namespace}")
     fs = Storage(spark)
     tables.ensure_namespace(spark, s)
-    st, batch, stage = _begin(fs, s, "snapshot")
+    st, batch, stage = begin_run(fs, s, "snapshot")
 
     log("splitting the PBF")
     local = os.path.join(s.work_dir, f"chunks-{s.namespace}-{batch}")
@@ -104,7 +104,7 @@ def run_import(s: Settings, source: str, sequence: int | None = None) -> None:
     )
     tables.write_cache(s, spark.read.parquet(stage + "/elements"))
 
-    _snapshot(spark, fs, s, mp, mapping_text, batch, stage, seq, osm_time)
+    write_snapshot(spark, fs, s, mp, mapping_text, batch, stage, seq, osm_time)
     st.update(
         batch=batch,
         sequence=seq,
@@ -126,8 +126,8 @@ def rebuild(s: Settings) -> None:
     if not st.get("batch"):
         raise SystemExit("nothing imported yet")
     seq, osm_time = st["sequence"], st.get("osm_time")
-    st, batch, stage = _begin(fs, s, "snapshot")
-    _snapshot(spark, fs, s, mp, mapping_text, batch, stage, seq, osm_time)
+    st, batch, stage = begin_run(fs, s, "snapshot")
+    write_snapshot(spark, fs, s, mp, mapping_text, batch, stage, seq, osm_time)
     st.update(batch=batch, current_run=None)
     state.save(fs, s, st)
     fs.delete(stage)

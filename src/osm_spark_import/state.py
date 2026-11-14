@@ -9,8 +9,8 @@
 
 from __future__ import annotations
 
-from .settings import Settings
-from .spark import Storage
+from osm_spark_import.settings import Settings
+from osm_spark_import.spark import Storage
 
 
 def path(s: Settings) -> str:

@@ -20,11 +20,11 @@ MAX_LINE_TILES = 500
 MAX_LAT = 85.0511287798066
 
 
-def _valid(lon: float, lat: float) -> bool:
+def in_range(lon: float, lat: float) -> bool:
     return -180 <= lon <= 180 and -MAX_LAT <= lat <= MAX_LAT
 
 
-def _box_count(w: float, s: float, e: float, n: float, zoom: int) -> int:
+def box_count(w: float, s: float, e: float, n: float, zoom: int) -> int:
     nw, se = mercantile.tile(w, n, zoom), mercantile.tile(e, s, zoom)
     return (se.x - nw.x + 1) * (se.y - nw.y + 1)
 
@@ -35,7 +35,7 @@ class TileList:
         self.tiles: set[tuple[int, int, int]] = set()
 
     def expire(self, lon: float, lat: float) -> None:
-        if not _valid(lon, lat):
+        if not in_range(lon, lat):
             return
         z = self.max_zoom
         x, y = mercantile.xy(lon, lat)
@@ -46,20 +46,20 @@ class TileList:
 
     def expire_nodes(self, nodes: list[tuple[float, float]], closed: bool) -> None:
         """nodes in WGS84; nothing if one is beyond the Web Mercator range."""
-        if not nodes or not all(_valid(*p) for p in nodes):
+        if not nodes or not all(in_range(*p) for p in nodes):
             return
         lons, lats = zip(*nodes, strict=True)
         w, s, e, n = min(lons), min(lats), max(lons), max(lats)
         for zoom in range(self.max_zoom, 0, -1):
-            count = _box_count(w, s, e, n, zoom)
+            count = box_count(w, s, e, n, zoom)
             if closed and count < MAX_BOX_TILES:
                 self.tiles.update((t.x, t.y, t.z) for t in mercantile.tiles(w, s, e, n, [zoom]))
                 return
             if not closed and count < MAX_LINE_TILES:
-                self._expire_line(nodes, (w, s, e, n), zoom)
+                self.expire_line(nodes, (w, s, e, n), zoom)
                 return
 
-    def _expire_line(self, nodes, bbox, zoom: int) -> None:
+    def expire_line(self, nodes, bbox, zoom: int) -> None:
         if len(nodes) == 1:
             self.expire(*nodes[0])
             return

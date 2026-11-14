@@ -15,12 +15,12 @@ from dataclasses import dataclass
 import numpy as np
 import shapely
 
-from . import geom as g
-from .columns import ColumnSpec, Ctx, MemberCtx, column_spec
-from .config import Config
-from .expire import TileList
-from .match import Match, is_closed, matchers
-from .tags import node_filter, relation_filter, way_filter
+from osm_spark_import.mapping import geom as g
+from osm_spark_import.mapping.columns import ColumnSpec, Ctx, MemberCtx, column_spec
+from osm_spark_import.mapping.config import Config
+from osm_spark_import.mapping.expire import TileList
+from osm_spark_import.mapping.match import Match, is_closed, matchers
+from osm_spark_import.mapping.tags import node_filter, relation_filter, way_filter
 
 REL_ID_OFFSET = -100000000000000000  # element.RelIDOffset
 MEMBER_TYPES = {"n": 0, "w": 1, "r": 2}
@@ -49,7 +49,7 @@ class Mapping:
         self.relation_filter = relation_filter(conf)
         self.max_gap = 1e-6 if srid == 4326 else 1e-1
 
-    _KIND_TABLES = {
+    KIND_TABLES = {
         "n": (("point", "geometry"), ("points",)),
         "w": (("linestring", "polygon", "geometry"), ("linestrings", "polygons")),
         "r": (("polygon", "relation", "relation_member", "geometry"), ("polygons",)),
@@ -59,7 +59,7 @@ class Mapping:
         """Tag keys an element of this kind needs to match any table (to
         pre-select targets on raw tags), or None for "any tagged element"
         (a mapping with __any__)."""
-        types, kinds = self._KIND_TABLES[kind]
+        types, kinds = self.KIND_TABLES[kind]
         keys: set[str] = set()
         for t in self.conf.tables.values():
             if t.type not in types:
@@ -102,7 +102,7 @@ class Mapping:
         return REL_ID_OFFSET - id_ if self.conf.single_id_space else -id_
 
 
-def _tags(raw) -> dict[str, str]:
+def tag_dict(raw) -> dict[str, str]:
     if not raw:
         return {}
     return dict(raw)
@@ -118,7 +118,7 @@ class Builder:
 
     # --- cache -----------------------------------------------------------------
 
-    def _fill_cache(self, units: list[dict]):
+    def fill_cache(self, units: list[dict]):
         mp = self.mp
         coords: dict[int, tuple[int, int]] = {}  # 1e-7 degrees
         nodes: dict[int, dict] = {}  # tags (non-empty after filtering)
@@ -128,15 +128,15 @@ class Builder:
 
         def put_node(id_, tags, lon, lat):
             coords[id_] = (lon, lat)
-            t = mp.node_filter.filter(_tags(tags))
+            t = mp.node_filter.filter(tag_dict(tags))
             if t:
                 nodes[id_] = t
 
         def put_way(id_, tags, refs):
-            ways[id_] = (mp.way_filter.filter(_tags(tags)), list(refs or []))
+            ways[id_] = (mp.way_filter.filter(tag_dict(tags)), list(refs or []))
 
         def put_rel(id_, tags, members):
-            t = mp.relation_filter.filter(_tags(tags))
+            t = mp.relation_filter.filter(tag_dict(tags))
             if t:  # PutRelations skips relations without tags
                 rels[id_] = (t, list(members or []))
 
@@ -171,7 +171,7 @@ class Builder:
         )
         return targets
 
-    def _fill(self, refs: list[int]) -> list[tuple[float, float]] | None:
+    def fill(self, refs: list[int]) -> list[tuple[float, float]] | None:
         """FillWay + NodesToSrid; None if a coordinate is missing."""
         out = []
         for r in refs:
@@ -181,42 +181,42 @@ class Builder:
             out.append(c)
         return out
 
-    def _wgs(self, refs: list[int]) -> list[tuple[float, float]]:
+    def wgs_coords(self, refs: list[int]) -> list[tuple[float, float]]:
         """WGS84 coordinates for expiring; missing nodes left out."""
         return [self.wgs[r] for r in refs if r in self.wgs]
 
     # --- rows ------------------------------------------------------------------
 
-    def _insert(self, matches: list[Match], tags: dict, elem_id: int, geom, gen: bool) -> None:
+    def insert(self, matches: list[Match], tags: dict, elem_id: int, geom, gen: bool) -> None:
         for m in matches:
             ctx = Ctx(tags, elem_id, geom, m.key, m.value, self.srid)
             self.rows.append(Row(m.table, elem_id, gen, [c.value(ctx) for c in self.mp.columns[m.table]]))
 
     def process(self, units: list[dict]) -> None:
-        targets = self._fill_cache(units)
+        targets = self.fill_cache(units)
         if self.deleter_expire:
             if self.tiles is not None:
-                self._deleter_expire(targets)
+                self.expire_old(targets)
             return
         for id_ in targets["r"]:
-            self._relation(id_)
+            self.build_relation(id_)
         for id_ in targets["w"]:
-            self._way(id_)
+            self.build_way(id_)
         for id_ in targets["n"]:
-            self._node(id_)
+            self.build_node(id_)
 
-    def _node(self, id_: int) -> None:
+    def build_node(self, id_: int) -> None:
         tags = self.nodes.get(id_)
         if tags is None:
             return
         matches = self.mp.m.point.match_node(tags)
         if not matches:
             return
-        self._insert(matches, tags, id_, g.point(*self.coords[id_]), False)
+        self.insert(matches, tags, id_, g.point(*self.coords[id_]), False)
         if self.tiles is not None:
             self.tiles.expire(*self.wgs[id_])
 
-    def _way(self, id_: int) -> None:
+    def build_way(self, id_: int) -> None:
         w = self.ways.get(id_)
         if w is None:
             return
@@ -228,19 +228,19 @@ class Builder:
         inserted = inserted_polygon = False
         line_matches = m.linestring.match_way(tags, refs)
         if line_matches:
-            nodes = self._fill(refs)
+            nodes = self.fill(refs)
             if nodes is None:
                 return
             try:
                 geom = g.linestring(nodes)
             except g.GeomError:
                 return
-            self._insert(line_matches, tags, self.mp.way_id(id_), geom, True)
+            self.insert(line_matches, tags, self.mp.way_id(id_), geom, True)
             inserted = True
         poly_matches = m.polygon.match_way(tags, refs)
         if poly_matches:
             if nodes is None:
-                nodes = self._fill(refs)
+                nodes = self.fill(refs)
             if nodes is None:
                 return
             if is_closed(refs):
@@ -248,12 +248,12 @@ class Builder:
                     geom = g.make_valid(g.polygon(nodes))
                 except g.GeomError:
                     return
-                self._insert(poly_matches, tags, self.mp.way_id(id_), geom, True)
+                self.insert(poly_matches, tags, self.mp.way_id(id_), geom, True)
                 inserted_polygon = True
         if (inserted or inserted_polygon) and self.tiles is not None:
-            self.tiles.expire_nodes(self._wgs(refs), inserted_polygon)
+            self.tiles.expire_nodes(self.wgs_coords(refs), inserted_polygon)
 
-    def _relation(self, id_: int) -> None:
+    def build_relation(self, id_: int) -> None:
         r = self.rels.get(id_)
         if r is None:
             return
@@ -271,18 +271,18 @@ class Builder:
             if mem["type"] != "w":
                 continue
             wtags, wrefs = self.ways[mem["ref"]]
-            nodes = self._fill(wrefs)
+            nodes = self.fill(wrefs)
             if nodes is None:
                 return
             member_ways[mem["ref"]] = (wtags, wrefs, nodes)
 
         rel_id = self.mp.rel_id(id_)
         inserted = False
-        if self._relation_members(id_, rel_id, tags, members, member_ways):
+        if self.build_relation_members(id_, rel_id, tags, members, member_ways):
             inserted = True
         rel_matches = self.mp.m.relation.match_relation(tags)
         if rel_matches:  # relation tables: no geometry
-            self._insert(rel_matches, tags, rel_id, None, True)
+            self.insert(rel_matches, tags, rel_id, None, True)
             inserted = True
         poly_matches = self.mp.m.polygon.match_relation(tags)
         if poly_matches:
@@ -291,16 +291,16 @@ class Builder:
                     [member_ways[m["ref"]][2] for m in members if m["type"] == "w"],
                     self.mp.max_gap,
                 )
-                self._insert(poly_matches, tags, rel_id, geom, True)
+                self.insert(poly_matches, tags, rel_id, geom, True)
                 inserted = True
             except g.GeomError:
                 pass
         if inserted and self.tiles is not None:
             for mem in members:
                 if mem["type"] == "w":
-                    self.tiles.expire_nodes(self._wgs(member_ways[mem["ref"]][1]), True)
+                    self.tiles.expire_nodes(self.wgs_coords(member_ways[mem["ref"]][1]), True)
 
-    def _relation_members(self, id_, rel_id, tags, members, member_ways) -> bool:
+    def build_relation_members(self, id_, rel_id, tags, members, member_ways) -> bool:
         """handleRelationMembers: True if succeeded (rows may be partial on failure)."""
         matches = self.mp.m.relation_member.match_relation(tags)
         if not matches:
@@ -354,7 +354,7 @@ class Builder:
 
     # --- expiring old versions ---------------------------------------------------
 
-    def _deleter_expire(self, targets) -> None:
+    def expire_old(self, targets) -> None:
         """Tiles of the old versions of a diff.
 
         The changed elements are visited, and the elements that depend on
@@ -373,7 +373,7 @@ class Builder:
             polygon = bool(m.polygon.match_relation(tags))
             if not (polygon or m.relation.match_relation(tags) or m.relation_member.match_relation(tags)):
                 continue
-            if id_ not in self.changed["r"] and not self._relation_complete(members):
+            if id_ not in self.changed["r"] and not self.relation_complete(members):
                 continue
             # FillMembers stops at the first missing way
             for mem in members:
@@ -382,7 +382,7 @@ class Builder:
                 w = self.ways.get(mem["ref"])
                 if w is None:
                     break
-                tl.expire_nodes(self._wgs(w[1]), polygon)
+                tl.expire_nodes(self.wgs_coords(w[1]), polygon)
         for id_ in targets["w"]:
             w = self.ways.get(id_)
             if w is None or not w[0]:
@@ -393,13 +393,13 @@ class Builder:
                 continue
             if id_ not in self.changed["w"] and any(r not in self.coords for r in refs):
                 continue
-            tl.expire_nodes(self._wgs(refs), polygon)
+            tl.expire_nodes(self.wgs_coords(refs), polygon)
         for id_ in targets["n"]:
             tags = self.nodes.get(id_)
             if tags and m.point.match_node(tags):
                 tl.expire(*self.wgs[id_])
 
-    def _relation_complete(self, members) -> bool:
+    def relation_complete(self, members) -> bool:
         for mem in members:
             if mem["type"] != "w":
                 continue

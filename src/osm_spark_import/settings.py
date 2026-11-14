@@ -6,8 +6,11 @@ import os
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from osm_spark_import.mapping import config
+from osm_spark_import.mapping.writer import Mapping
 
-def _env(name: str, default: str) -> str:
+
+def env(name: str, default: str) -> str:
     return os.environ.get(name) or default
 
 
@@ -40,25 +43,25 @@ class Settings:
     @classmethod
     def from_env(cls) -> Settings:
         return cls(
-            mapping=_env("OSM_MAPPING", ""),
-            namespace=_env("OSM_NAMESPACE", "osm"),
-            srid=int(_env("OSM_SRID", "3857")),
-            catalog=_env("OSM_CATALOG", "osm"),
-            storage_root=_env("OSM_STORAGE_ROOT", cls.storage_root).rstrip("/"),
-            buckets=int(_env("OSM_BUCKETS", "16")),
-            partitions=int(_env("OSM_PARTITIONS", "0")),
-            chunk_mb=int(_env("OSM_CHUNK_MB", "32")),
-            replication_url=_env("OSM_REPLICATION_URL", cls.replication_url),
-            max_diffs=int(_env("OSM_MAX_DIFFS", "24")),
-            work_dir=_env("OSM_WORK_DIR", "/data/work"),
-            webhdfs_url=_env("OSM_WEBHDFS_URL", cls.webhdfs_url).rstrip("/"),
-            webhdfs_user=_env("OSM_WEBHDFS_USER", ""),
-            schema=_env("OSM_SCHEMA", "public"),
-            schema_import=_env("OSM_SCHEMA_IMPORT", "import"),
-            schema_backup=_env("OSM_SCHEMA_BACKUP", "backup"),
-            loader_workers=int(_env("OSM_LOADER_WORKERS", "4")),
-            expire_dir=_env("OSM_EXPIRE_DIR", ""),
-            expire_zoom=int(_env("OSM_EXPIRE_ZOOM", "15")),
+            mapping=env("OSM_MAPPING", ""),
+            namespace=env("OSM_NAMESPACE", "osm"),
+            srid=int(env("OSM_SRID", "3857")),
+            catalog=env("OSM_CATALOG", "osm"),
+            storage_root=env("OSM_STORAGE_ROOT", cls.storage_root).rstrip("/"),
+            buckets=int(env("OSM_BUCKETS", "16")),
+            partitions=int(env("OSM_PARTITIONS", "0")),
+            chunk_mb=int(env("OSM_CHUNK_MB", "32")),
+            replication_url=env("OSM_REPLICATION_URL", cls.replication_url),
+            max_diffs=int(env("OSM_MAX_DIFFS", "24")),
+            work_dir=env("OSM_WORK_DIR", "/data/work"),
+            webhdfs_url=env("OSM_WEBHDFS_URL", cls.webhdfs_url).rstrip("/"),
+            webhdfs_user=env("OSM_WEBHDFS_USER", ""),
+            schema=env("OSM_SCHEMA", "public"),
+            schema_import=env("OSM_SCHEMA_IMPORT", "import"),
+            schema_backup=env("OSM_SCHEMA_BACKUP", "backup"),
+            loader_workers=int(env("OSM_LOADER_WORKERS", "4")),
+            expire_dir=env("OSM_EXPIRE_DIR", ""),
+            expire_zoom=int(env("OSM_EXPIRE_ZOOM", "15")),
         )
 
     def check_mapping(self) -> None:
@@ -69,8 +72,6 @@ class Settings:
 
     def load_mapping(self):
         """(mapping.writer.Mapping, mapping file text)."""
-        from .mapping import config
-        from .mapping.writer import Mapping
 
         self.check_mapping()
         with open(self.mapping) as f:

@@ -33,10 +33,10 @@ from osmium.replication.server import ReplicationServer
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
-from . import outbox, pipeline, state, tables
-from .imports import download, log
-from .settings import Settings
-from .spark import Storage, session
+from osm_spark_import import outbox, pipeline, state, tables
+from osm_spark_import.imports import download, log
+from osm_spark_import.settings import Settings
+from osm_spark_import.spark import Storage, session
 
 CHANGE = pa.schema(
     [
@@ -55,13 +55,13 @@ CHANGE = pa.schema(
 )
 
 
-class _Changes(osmium.SimpleHandler):
+class Changes(osmium.SimpleHandler):
     def __init__(self, seq: int):
         super().__init__()
         self.seq = seq
         self.rows: dict[str, list] = {n: [] for n in CHANGE.names}
 
-    def _add(self, o, k, lon=None, lat=None, refs=None, members=None):
+    def add(self, o, k, lon=None, lat=None, refs=None, members=None):
         r = self.rows
         r["a"].append("d" if o.deleted else "m")
         r["seq"].append(self.seq)
@@ -78,19 +78,19 @@ class _Changes(osmium.SimpleHandler):
     def node(self, n):
         loc = n.location
         if n.deleted or not loc.valid():
-            self._add(n, "n")
+            self.add(n, "n")
         else:
-            self._add(n, "n", loc.x, loc.y)
+            self.add(n, "n", loc.x, loc.y)
 
     def way(self, w):
-        self._add(w, "w", refs=None if w.deleted else [r.ref for r in w.nodes])
+        self.add(w, "w", refs=None if w.deleted else [r.ref for r in w.nodes])
 
     def relation(self, r):
-        self._add(r, "r", members=None if r.deleted else [(m.type, m.ref, m.role) for m in r.members])
+        self.add(r, "r", members=None if r.deleted else [(m.type, m.ref, m.role) for m in r.members])
 
 
 def decode_osc(path: str, seq: int, out: str) -> None:
-    h = _Changes(seq)
+    h = Changes(seq)
     h.apply_file(path)
     pq.write_table(pa.Table.from_pydict(h.rows, schema=CHANGE), out)
 
@@ -273,7 +273,7 @@ def recover(spark: SparkSession, fs: Storage, s: Settings, st: dict) -> None:
     state.save(fs, s, st)
 
 
-def _pair_delta(old_pairs: DataFrame, new_pairs: DataFrame, keys: list[str]) -> DataFrame:
+def pair_delta(old_pairs: DataFrame, new_pairs: DataFrame, keys: list[str]) -> DataFrame:
     """Index rows to delete (op d) and insert (op i); pairs in both stay."""
     d = old_pairs.distinct().withColumn("w", F.lit(-1))
     i = new_pairs.distinct().withColumn("w", F.lit(1))
@@ -286,7 +286,7 @@ def _pair_delta(old_pairs: DataFrame, new_pairs: DataFrame, keys: list[str]) -> 
     )
 
 
-def _merge(spark: SparkSession, s: Settings, src: DataFrame, table: str, sql: str) -> None:
+def merge_into(spark: SparkSession, s: Settings, src: DataFrame, table: str, sql: str) -> None:
     view = f"src_{table}"
     src.createOrReplaceTempView(view)
     spark.sql(sql.format(t=s.table(table), s=view))
@@ -300,12 +300,12 @@ def merge_cache(spark: SparkSession, s: Settings, final: DataFrame, old: dict, s
         "nodes": final.filter("k = 'n'").select("id", "a", "lon", "lat", "tags"),
         "ways": ways.select("id", "a", "tags", "refs"),
         "relations": rels.select("id", "a", "tags", "members"),
-        "way_nodes": _pair_delta(
+        "way_nodes": pair_delta(
             tables.way_nodes(old["ways"].join(ways.select("id"), "id", "left_semi")),
             tables.way_nodes(ways.filter("a != 'd'")),
             ["node_id", "way_id"],
         ),
-        "rel_members": _pair_delta(
+        "rel_members": pair_delta(
             tables.rel_members(old["relations"].join(rels.select("id"), "id", "left_semi")),
             tables.rel_members(rels.filter("a != 'd'")),
             ["member_type", "member_id", "rel_id"],
@@ -315,7 +315,7 @@ def merge_cache(spark: SparkSession, s: Settings, final: DataFrame, old: dict, s
         df.write.mode("overwrite").parquet(f"{stage}/merge_{name}")
     src = {name: spark.read.parquet(f"{stage}/merge_{name}") for name in src}
 
-    _merge(
+    merge_into(
         spark,
         s,
         src["nodes"],
@@ -326,7 +326,7 @@ def merge_cache(spark: SparkSession, s: Settings, final: DataFrame, old: dict, s
         WHEN MATCHED THEN UPDATE SET t.lon = s.lon, t.lat = s.lat, t.tags = s.tags
         WHEN NOT MATCHED AND s.a != 'd' THEN INSERT (id, lon, lat, tags) VALUES (s.id, s.lon, s.lat, s.tags)""",
     )
-    _merge(
+    merge_into(
         spark,
         s,
         src["ways"],
@@ -337,7 +337,7 @@ def merge_cache(spark: SparkSession, s: Settings, final: DataFrame, old: dict, s
         WHEN MATCHED THEN UPDATE SET t.tags = s.tags, t.refs = s.refs
         WHEN NOT MATCHED AND s.a != 'd' THEN INSERT (id, tags, refs) VALUES (s.id, s.tags, s.refs)""",
     )
-    _merge(
+    merge_into(
         spark,
         s,
         src["relations"],
@@ -348,7 +348,7 @@ def merge_cache(spark: SparkSession, s: Settings, final: DataFrame, old: dict, s
         WHEN MATCHED THEN UPDATE SET t.tags = s.tags, t.members = s.members
         WHEN NOT MATCHED AND s.a != 'd' THEN INSERT (id, tags, members) VALUES (s.id, s.tags, s.members)""",
     )
-    _merge(
+    merge_into(
         spark,
         s,
         src["way_nodes"],
@@ -358,7 +358,7 @@ def merge_cache(spark: SparkSession, s: Settings, final: DataFrame, old: dict, s
         WHEN MATCHED AND s.op = 'd' THEN DELETE
         WHEN NOT MATCHED AND s.op = 'i' THEN INSERT (node_id, way_id) VALUES (s.node_id, s.way_id)""",
     )
-    _merge(
+    merge_into(
         spark,
         s,
         src["rel_members"],

@@ -4,7 +4,7 @@ import io
 import pyarrow as pa
 from test_osm import DEFAULT_MAPPING
 
-from osm_spark_import.loader import _csv, id_expr, table_names
+from osm_spark_import.loader import id_expr, table_names, to_csv
 from osm_spark_import.mapping import config, postgis
 from osm_spark_import.mapping.writer import Mapping
 
@@ -20,7 +20,7 @@ def test_csv_for_copy():
             "way": [b"\x01\x02", b"\xff"],
         }
     )
-    text = _csv(b, {"way"}).decode()
+    text = to_csv(b, {"way"}).decode()
     # PostgreSQL CSV: unquoted empty is NULL, "" is the empty string
     rows = list(csv.reader(io.StringIO(text)))
     assert rows[0] == ["1", "", 'a "quoted",\nvalue', "true", "38549.098", "0102"]

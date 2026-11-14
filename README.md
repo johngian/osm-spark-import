@@ -88,7 +88,7 @@ column values, geometries and multipolygons, tile lists, PBF splitting, SQL,
 CSV for COPY):
 
 ```sh
-docker compose run --rm client sh -c 'cd /opt/osm-spark-import/jobs && python -m pytest tests'
+docker compose run --rm client sh -c 'cd /opt/osm-spark-import && python -m pytest tests'
 ```
 
 End to end, an import plus diffs must give the same tables as an import of

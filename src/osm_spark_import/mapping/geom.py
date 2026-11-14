@@ -18,8 +18,8 @@ import shapely.errors
 from pyproj import Transformer
 
 TOLERANCE = 1e-9  # repeated points
-_TO_MERC = Transformer.from_crs(4326, 3857, always_xy=True)
-_TO_WGS = Transformer.from_crs(3857, 4326, always_xy=True)
+TO_MERC = Transformer.from_crs(4326, 3857, always_xy=True)
+TO_WGS = Transformer.from_crs(3857, 4326, always_xy=True)
 
 
 class GeomError(Exception):
@@ -37,13 +37,13 @@ def project(lons: np.ndarray, lats: np.ndarray, srid: int) -> tuple[np.ndarray, 
     """WGS84 degrees to srid (3857 or 4326)."""
     if srid == 4326:
         return lons, lats
-    return _TO_MERC.transform(lons, lats)
+    return TO_MERC.transform(lons, lats)
 
 
 def to_wgs84(geom, srid: int):
     if srid == 4326:
         return geom
-    return shapely.transform(geom, lambda c: np.column_stack(_TO_WGS.transform(c[:, 0], c[:, 1])))
+    return shapely.transform(geom, lambda c: np.column_stack(TO_WGS.transform(c[:, 0], c[:, 1])))
 
 
 # --- geometries -------------------------------------------------------------------

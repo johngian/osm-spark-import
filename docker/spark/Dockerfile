@@ -17,7 +17,10 @@ ENV PATH=$SPARK_HOME/bin:$PATH
 RUN curl -fsSL -o "$SPARK_HOME/jars/iceberg-spark-runtime-3.5_2.12-${ICEBERG_VERSION}.jar" \
       "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/${ICEBERG_VERSION}/iceberg-spark-runtime-3.5_2.12-${ICEBERG_VERSION}.jar"
 COPY docker/spark/spark-defaults.conf docker/spark/log4j2.properties /etc/spark/
-COPY jobs /opt/osm-spark-import/jobs
-RUN pip install --no-cache-dir "/opt/osm-spark-import/jobs[test]" \
- && cd /opt/osm-spark-import/jobs && python -m pytest -q tests
+COPY pyproject.toml LICENSE NOTICE README.md /opt/osm-spark-import/
+COPY src /opt/osm-spark-import/src
+COPY tests /opt/osm-spark-import/tests
+COPY mappings /opt/osm-spark-import/mappings
+RUN pip install --no-cache-dir "/opt/osm-spark-import[test]" \
+ && cd /opt/osm-spark-import && python -m pytest -q -p no:cacheprovider tests
 WORKDIR /data

@@ -31,25 +31,25 @@ class Storage:
         self.jvm = spark._jvm
         self.conf = spark._jsc.hadoopConfiguration()
 
-    def _fs(self, path: str):
+    def resolve(self, path: str):
         p = self.jvm.org.apache.hadoop.fs.Path(path)
         return p.getFileSystem(self.conf), p
 
     def exists(self, path: str) -> bool:
-        fs, p = self._fs(path)
+        fs, p = self.resolve(path)
         return fs.exists(p)
 
     def mkdirs(self, path: str) -> None:
-        fs, p = self._fs(path)
+        fs, p = self.resolve(path)
         fs.mkdirs(p)
 
     def delete(self, path: str) -> None:
-        fs, p = self._fs(path)
+        fs, p = self.resolve(path)
         if fs.exists(p):
             fs.delete(p, True)
 
     def put(self, local: str, remote: str) -> None:
-        fs, p = self._fs(remote)
+        fs, p = self.resolve(remote)
         fs.copyFromLocalFile(False, True, self.jvm.org.apache.hadoop.fs.Path(local), p)
 
     def put_files(self, locals_: Iterable[str], remote_dir: str) -> None:
@@ -58,7 +58,7 @@ class Storage:
             self.put(path, remote_dir.rstrip("/") + "/" + path.rsplit("/", 1)[-1])
 
     def read_text(self, path: str) -> str | None:
-        fs, p = self._fs(path)
+        fs, p = self.resolve(path)
         if not fs.exists(p):
             return None
         stream = fs.open(p)
@@ -69,7 +69,7 @@ class Storage:
 
     def write_text(self, path: str, text: str) -> None:
         """Write to a temporary file, then rename it over path."""
-        fs, p = self._fs(path)
+        fs, p = self.resolve(path)
         tmp = self.jvm.org.apache.hadoop.fs.Path(path + ".tmp")
         out = fs.create(tmp, True)
         try:

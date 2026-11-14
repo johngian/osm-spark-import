@@ -15,7 +15,7 @@ from __future__ import annotations
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
-from .settings import Settings
+from osm_spark_import.settings import Settings
 
 CACHE_TABLES = {
     "nodes": "id",

@@ -13,7 +13,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .config import Config, KeyValues
+from osm_spark_import.mapping.config import Config, KeyValues
 
 Filter = Callable[[dict, str, bool], bool]  # (tags, matched key, closed) -> keep
 
@@ -26,12 +26,12 @@ class Match:
     sub: str = ""
 
 
-def _add_mapping(into: dict, kvs: KeyValues, table: str, sub: str) -> None:
+def add_mapping(into: dict, kvs: KeyValues, table: str, sub: str) -> None:
     for k, v, order in kvs:
         into.setdefault(k, {}).setdefault(v, []).append((table, sub, order))
 
 
-def _value_filter(keep_if: bool, key: str, values: list[str]) -> Filter:
+def value_filter(keep_if: bool, key: str, values: list[str]) -> Filter:
     """makeFiltersFunction: require (keep_if=True) / reject (False)."""
     if "__any__" in values:
         return lambda tags, k, closed: keep_if if key in tags else not keep_if
@@ -39,7 +39,7 @@ def _value_filter(keep_if: bool, key: str, values: list[str]) -> Filter:
     return lambda tags, k, closed: keep_if if tags.get(key) in vals and key in tags else not keep_if
 
 
-def _regexp_filter(keep_if: bool, key: str, pattern: str) -> Filter:
+def regexp_filter(keep_if: bool, key: str, pattern: str) -> Filter:
     r = re.compile(pattern)  # unanchored search
     return lambda tags, k, closed: keep_if if key in tags and r.search(tags[key]) else not keep_if
 
@@ -59,37 +59,37 @@ class Matcher:
         for name, t in conf.tables.items():
             if t.type != "geometry" and t.type != table_type:
                 continue
-            _add_mapping(self.mappings, t.mapping, name, "")
+            add_mapping(self.mappings, t.mapping, name, "")
             for sub, kvs in t.mappings.items():
-                _add_mapping(self.mappings, kvs, name, sub)
+                add_mapping(self.mappings, kvs, name, sub)
             if kind:
-                _add_mapping(self.mappings, t.type_mappings[kind], name, "")
+                add_mapping(self.mappings, t.type_mappings[kind], name, "")
         self.filters: dict[str, list[Filter]] = {}
-        self._add_filters(conf)
+        self.add_filters(conf)
         if typed_filter_type:
-            self._add_typed_filters(conf, typed_filter_type)
+            self.add_typed_filters(conf, typed_filter_type)
         self.rel_filters: dict[str, list[Filter]] = {}
         if relation_filters:
-            self._add_relation_filters(conf)
+            self.add_relation_filters(conf)
 
-    def _add_filters(self, conf: Config) -> None:
+    def add_filters(self, conf: Config) -> None:
         for name, t in conf.tables.items():
             f = t.filters
             if f is None:
                 continue
             fl = self.filters.setdefault(name, [])
             for kv in f.exclude_tags or []:
-                fl.append(_value_filter(False, str(kv[0]), [str(kv[1])]))
+                fl.append(value_filter(False, str(kv[0]), [str(kv[1])]))
             for key in dict.fromkeys(k for k, _, _ in f.require):
-                fl.append(_value_filter(True, key, [v for k, v, _ in f.require if k == key]))
+                fl.append(value_filter(True, key, [v for k, v, _ in f.require if k == key]))
             for key in dict.fromkeys(k for k, _, _ in f.reject):
-                fl.append(_value_filter(False, key, [v for k, v, _ in f.reject if k == key]))
+                fl.append(value_filter(False, key, [v for k, v, _ in f.reject if k == key]))
             for key, pattern in f.require_regexp.items():
-                fl.append(_regexp_filter(True, key, pattern))
+                fl.append(regexp_filter(True, key, pattern))
             for key, pattern in f.reject_regexp.items():
-                fl.append(_regexp_filter(False, key, pattern))
+                fl.append(regexp_filter(False, key, pattern))
 
-    def _add_typed_filters(self, conf: Config, table_type: str) -> None:
+    def add_typed_filters(self, conf: Config, table_type: str) -> None:
         area_tags = set(conf.area_tags) if conf.area_tags is not None else None
         linear_tags = set(conf.linear_tags) if conf.linear_tags is not None else None
         for name, t in conf.tables.items():
@@ -117,7 +117,7 @@ class Matcher:
 
                 self.filters.setdefault(name, []).append(poly)
 
-    def _add_relation_filters(self, conf: Config) -> None:
+    def add_relation_filters(self, conf: Config) -> None:
         for name, t in conf.tables.items():
             if t.relation_types is not None:
                 types = set(t.relation_types)
@@ -201,12 +201,12 @@ def matchers(conf: Config) -> Matchers:
         linestring=Matcher(conf, "linestring", "linestring", False, False),
         polygon=Matcher(conf, "polygon", "polygon", True, True),
         # relationMatcher adds the typed filters of polygon and relation tables
-        relation=_relation_matcher(conf),
+        relation=relation_matcher(conf),
         relation_member=Matcher(conf, "relation_member", "relation_member", True, True),
     )
 
 
-def _relation_matcher(conf: Config) -> Matcher:
+def relation_matcher(conf: Config) -> Matcher:
     m = Matcher(conf, "relation", "polygon", True, True)
-    m._add_typed_filters(conf, "relation")
+    m.add_typed_filters(conf, "relation")
     return m

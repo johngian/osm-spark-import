@@ -24,6 +24,9 @@ import numpy as np
 import osmium
 import pyarrow as pa
 
+from osm_spark_import.mapping import config
+from osm_spark_import.mapping.writer import Builder, Mapping, ewkb
+
 # --- schemas -----------------------------------------------------------------
 
 TAGS = pa.map_(pa.string(), pa.string())
@@ -55,7 +58,7 @@ ROW = pa.schema(
 # --- splitting ---------------------------------------------------------------
 
 
-def _uvarint(b: bytes, i: int) -> tuple[int, int]:
+def uvarint(b: bytes, i: int) -> tuple[int, int]:
     shift = value = 0
     while True:
         if i >= len(b):
@@ -68,18 +71,18 @@ def _uvarint(b: bytes, i: int) -> tuple[int, int]:
         shift += 7
 
 
-def _blob_header(b: bytes) -> tuple[str, int]:
+def blob_header(b: bytes) -> tuple[str, int]:
     """BlobHeader: type (1, string), indexdata (2, bytes), datasize (3, int32)."""
     typ, size, i = None, None, 0
     while i < len(b):
-        key, i = _uvarint(b, i)
+        key, i = uvarint(b, i)
         field, wire = key >> 3, key & 7
         if wire == 0:
-            v, i = _uvarint(b, i)
+            v, i = uvarint(b, i)
             if field == 3:
                 size = v
         elif wire == 2:
-            n, i = _uvarint(b, i)
+            n, i = uvarint(b, i)
             if field == 1:
                 typ = b[i : i + n].decode()
             i += n
@@ -90,7 +93,7 @@ def _blob_header(b: bytes) -> tuple[str, int]:
     return typ, size
 
 
-def _read_blob(f) -> tuple[str, bytes] | None:
+def read_blob(f) -> tuple[str, bytes] | None:
     head = f.read(4)
     if not head:
         return None
@@ -100,7 +103,7 @@ def _read_blob(f) -> tuple[str, bytes] | None:
     if hlen > 64 * 1024:
         raise ValueError(f"blob header too large: {hlen}")
     header = f.read(hlen)
-    typ, size = _blob_header(header)
+    typ, size = blob_header(header)
     data = f.read(size)
     if len(data) < size:
         raise ValueError("truncated PBF")
@@ -112,12 +115,12 @@ def split_pbf(path: str, out_dir: str, chunk_bytes: int = 32 << 20) -> list[str]
     os.makedirs(out_dir, exist_ok=True)
     paths: list[str] = []
     with open(path, "rb") as f:
-        first = _read_blob(f)
+        first = read_blob(f)
         if first is None or first[0] != "OSMHeader":
             raise ValueError(f"{path}: not a PBF file (no OSMHeader)")
         header = first[1]
         out, written = None, 0
-        while (blob := _read_blob(f)) is not None:
+        while (blob := read_blob(f)) is not None:
             typ, data = blob
             if typ != "OSMData":
                 continue
@@ -138,7 +141,7 @@ def split_pbf(path: str, out_dir: str, chunk_bytes: int = 32 << 20) -> list[str]
 # --- decoding ----------------------------------------------------------------
 
 
-class _Collector(osmium.SimpleHandler):
+class Collector(osmium.SimpleHandler):
     def __init__(self, emit, batch_size: int):
         super().__init__()
         self.emit, self.batch_size = emit, batch_size
@@ -178,7 +181,7 @@ class _Collector(osmium.SimpleHandler):
 def decode_pbf(data: bytes, batch_size: int = 100_000) -> list[pa.RecordBatch]:
     """Decode a PBF file (a chunk) into element record batches."""
     out: list[pa.RecordBatch] = []
-    h = _Collector(out.append, batch_size)
+    h = Collector(out.append, batch_size)
     h.apply_buffer(data, "pbf")
     h.flush()
     return out
@@ -194,7 +197,7 @@ def decode_chunks(batches: Iterator[pa.RecordBatch]) -> Iterator[pa.RecordBatch]
 # --- building ----------------------------------------------------------------
 
 
-def _json_value(v):
+def json_value(v):
     if isinstance(v, np.floating):
         return float(v)  # float32 values: exact as float64
     return v
@@ -202,7 +205,6 @@ def _json_value(v):
 
 def build_rows(units: list[dict], mp, expire_zoom: int = 0, deleter_expire: bool = False) -> pa.RecordBatch:
     """Rows (and expired tiles) of a batch of work units."""
-    from .mapping.writer import Builder, ewkb
 
     b = Builder(mp, expire_zoom, deleter_expire)
     b.process(units)
@@ -216,7 +218,7 @@ def build_rows(units: list[dict], mp, expire_zoom: int = 0, deleter_expire: bool
                 if geom is None:
                     geom = ewkb(v, mp.srid)
             else:
-                vals[c.name] = _json_value(v)
+                vals[c.name] = json_value(v)
         cols["tbl"].append(r.table)
         cols["id"].append(r.id)
         cols["g"].append(r.gen)
@@ -237,9 +239,6 @@ def make_build_fn(
     the function pickles small and parses it once per task."""
 
     def fn(batches: Iterator[pa.RecordBatch]) -> Iterator[pa.RecordBatch]:
-        from .mapping import config
-        from .mapping.writer import Mapping
-
         mp = Mapping(config.from_text(mapping_text), srid)
         for batch in batches:
             units = batch.to_pylist()  # maps become lists of (key, value)

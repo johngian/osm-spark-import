@@ -24,7 +24,7 @@ KeyValues = list[tuple[str, str, int]]
 TABLE_TYPES = ("point", "linestring", "polygon", "geometry", "relation", "relation_member")
 
 
-class _Map(dict):
+class PairsMap(dict):
     """A YAML mapping that also keeps all its (key, value) pairs, duplicates
     included: mapping values (KeyValues) keep every duplicate key, other maps
     keep the last value of a duplicate key, as a dict does."""
@@ -32,24 +32,24 @@ class _Map(dict):
     pairs: list
 
 
-class _Loader(yaml.SafeLoader):
+class YamlLoader(yaml.SafeLoader):
     pass
 
 
-def _construct_map(loader: _Loader, node: yaml.MappingNode) -> _Map:
+def construct_map(loader: YamlLoader, node: yaml.MappingNode) -> PairsMap:
     loader.flatten_mapping(node)
     pairs = [
         (loader.construct_object(k, deep=True), loader.construct_object(v, deep=True)) for k, v in node.value
     ]
-    m = _Map(pairs)
+    m = PairsMap(pairs)
     m.pairs = pairs
     return m
 
 
-_Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_map)
+YamlLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, construct_map)
 
 
-def _key_values(raw: Any, where: str) -> KeyValues:
+def parse_key_values(raw: Any, where: str) -> KeyValues:
     if raw is None:
         return []
     if not isinstance(raw, dict):
@@ -120,7 +120,7 @@ class Config:
     single_id_space: bool
 
 
-def _column(raw: dict, where: str) -> Column:
+def parse_column(raw: dict, where: str) -> Column:
     if not isinstance(raw, dict):
         raise MappingError(f"{where}: column is not a mapping")
     return Column(
@@ -133,12 +133,12 @@ def _column(raw: dict, where: str) -> Column:
     )
 
 
-def _filters(raw: Any, where: str) -> Filters | None:
+def parse_filters(raw: Any, where: str) -> Filters | None:
     if raw is None:
         return None
     return Filters(
-        require=_key_values(raw.get("require"), f"{where} require"),
-        reject=_key_values(raw.get("reject"), f"{where} reject"),
+        require=parse_key_values(raw.get("require"), f"{where} require"),
+        reject=parse_key_values(raw.get("reject"), f"{where} reject"),
         require_regexp={str(k): str(v) for k, v in (raw.get("require_regexp") or {}).items()},
         reject_regexp={str(k): str(v) for k, v in (raw.get("reject_regexp") or {}).items()},
         exclude_tags=raw.get("exclude_tags"),
@@ -162,17 +162,17 @@ def parse(raw: dict) -> Config:
         tables[name] = Table(
             name=name,
             type=t["type"],
-            mapping=_key_values(t.get("mapping"), where),
+            mapping=parse_key_values(t.get("mapping"), where),
             mappings={
-                sub: _key_values((m or {}).get("mapping"), f"{where} mappings {sub}")
+                sub: parse_key_values((m or {}).get("mapping"), f"{where} mappings {sub}")
                 for sub, m in (t.get("mappings") or {}).items()
             },
             type_mappings={
-                kind: _key_values(tm.get(kind), f"{where} type_mappings {kind}")
+                kind: parse_key_values(tm.get(kind), f"{where} type_mappings {kind}")
                 for kind in ("points", "linestrings", "polygons")
             },
-            columns=[_column(c, f"{where} column {i}") for i, c in enumerate(cols or [])],
-            filters=_filters(t.get("filters"), where),
+            columns=[parse_column(c, f"{where} column {i}") for i, c in enumerate(cols or [])],
+            filters=parse_filters(t.get("filters"), where),
             relation_types=(
                 [str(v) for v in t["relation_types"]] if t.get("relation_types") is not None else None
             ),
@@ -201,8 +201,8 @@ def parse(raw: dict) -> Config:
 
 def load(path: str) -> Config:
     with open(path) as f:
-        return parse(yaml.load(f, Loader=_Loader))
+        return parse(yaml.load(f, Loader=YamlLoader))
 
 
 def from_text(text: str) -> Config:
-    return parse(yaml.load(text, Loader=_Loader))
+    return parse(yaml.load(text, Loader=YamlLoader))

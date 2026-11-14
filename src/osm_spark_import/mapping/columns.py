@@ -17,10 +17,10 @@ import numpy as np
 import shapely
 from pyproj import Geod
 
-from . import geom
-from .config import Column, MappingError
+from osm_spark_import.mapping import geom
+from osm_spark_import.mapping.config import Column, MappingError
 
-_GEOD = Geod(ellps="WGS84")
+GEOD = Geod(ellps="WGS84")
 
 # value type -> (PostgreSQL type, Arrow/Spark type)
 VALUE_TYPES = {
@@ -54,12 +54,12 @@ DEFAULT_RANKS = {
 
 INT32 = (-(2**31), 2**31 - 1)
 INT64 = (-(2**63), 2**63 - 1)
-_INT_RE = re.compile(r"[+-]?[0-9]+\Z")
+INT_RE = re.compile(r"[+-]?[0-9]+\Z")
 
 
 def parse_int(s: str | None, bits: int) -> int | None:
     """strconv.ParseInt(s, 10, bits): None on error (empty, syntax, range)."""
-    if not s or not _INT_RE.match(s):
+    if not s or not INT_RE.match(s):
         return None
     v = int(s)
     lo, hi = INT32 if bits == 32 else INT64
@@ -69,7 +69,7 @@ def parse_int(s: str | None, bits: int) -> int | None:
 def parse_int_ignoring_error(s: str | None, bits: int) -> int:
     """`v, _ := strconv.ParseInt(s, 10, bits)`: 0 on syntax errors, the
     clamped value on range errors."""
-    if not s or not _INT_RE.match(s):
+    if not s or not INT_RE.match(s):
         return 0
     lo, hi = INT32 if bits == 32 else INT64
     return min(max(int(s), lo), hi)
@@ -101,43 +101,43 @@ class MemberCtx:
     element: Ctx | None  # the member element, if cached
 
 
-def _truthy(v: str) -> bool:
+def truthy(v: str) -> bool:
     return not (v == "" or v == "0" or v == "false" or v == "no")
 
 
-def _bool(val, c):
-    return _truthy(val)
+def bool_value(val, c):
+    return truthy(val)
 
 
-def _boolint(val, c):
-    return 1 if _truthy(val) else 0
+def boolint_value(val, c):
+    return 1 if truthy(val) else 0
 
 
-def _string(val, c):
+def string_value(val, c):
     return val
 
 
-def _integer(val, c):
+def integer_value(val, c):
     return parse_int(val, 32)
 
 
-def _id(val, c):
+def id_value(val, c):
     return c.elem_id
 
 
-def _key(val, c):
+def matched_key(val, c):
     return c.match_key
 
 
-def _value(val, c):
+def matched_value(val, c):
     return c.match_value
 
 
-def _geometry(val, c):
+def geometry_value(val, c):
     return c.geom
 
 
-def _direction(val, c):
+def direction_value(val, c):
     if val in ("1", "yes", "true"):
         return 1
     if val == "-1":
@@ -145,7 +145,7 @@ def _direction(val, c):
     return 0
 
 
-def _area(val, c):
+def area_value(val, c):
     if c.geom is None:
         return None
     a = float(shapely.area(c.geom))
@@ -154,21 +154,21 @@ def _area(val, c):
     return np.float32(a)
 
 
-def _webmerc_area(val, c):
+def webmerc_area_value(val, c):
     """Geodesic area in m² (WGS84 ellipsoid)."""
     if c.geom is None:
         return None
-    a = abs(_GEOD.geometry_area_perimeter(geom.to_wgs84(c.geom, c.srid))[0])
+    a = abs(GEOD.geometry_area_perimeter(geom.to_wgs84(c.geom, c.srid))[0])
     if a == 0.0:
         return None
     return np.float32(a)
 
 
-def _hstore_escape(s: str) -> str:
+def hstore_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _enum_arg(column: Column, key: str) -> dict[str, int]:
+def enum_arg(column: Column, key: str) -> dict[str, int]:
     values = column.args.get(key)
     if values is None:
         raise MappingError(f"missing '{key}' in args for {column.type}")
@@ -182,12 +182,12 @@ def _enum_arg(column: Column, key: str) -> dict[str, int]:
     return out
 
 
-def _make_hstore(column: Column):
-    include = None if "include" not in column.args else _enum_arg(column, "include")
+def make_hstore(column: Column):
+    include = None if "include" not in column.args else enum_arg(column, "include")
 
     def hstore(val, c):
         return ", ".join(
-            f'"{_hstore_escape(k)}"=>"{_hstore_escape(v)}"'
+            f'"{hstore_escape(k)}"=>"{hstore_escape(v)}"'
             for k, v in c.tags.items()
             if include is None or include.get(k, 0) != 0
         )
@@ -195,7 +195,7 @@ def _make_hstore(column: Column):
     return hstore
 
 
-def _way_zorder_default(val, c):
+def way_zorder_default(val, c):
     z = wrap64(parse_int_ignoring_error(c.tags.get("layer"), 64) * 10)
     rank = DEFAULT_RANKS.get(c.match_value, 0)
     if rank == 0 and "railway" in c.tags:
@@ -208,10 +208,10 @@ def _way_zorder_default(val, c):
     return z if INT32[0] <= z <= INT32[1] else None
 
 
-def _make_wayzorder(column: Column):
+def make_wayzorder(column: Column):
     if "ranks" not in column.args:
-        return _way_zorder_default
-    ranks = _enum_arg(column, "ranks")
+        return way_zorder_default
+    ranks = enum_arg(column, "ranks")
     offset = len(ranks)
     default = column.args.get("default")
     default_rank = int(default) if isinstance(default, float) else 0  # only float values count
@@ -232,7 +232,7 @@ def _make_wayzorder(column: Column):
     return wayzorder
 
 
-def _make_zorder(column: Column):
+def make_zorder(column: Column):
     ranks_list = column.args.get("ranks")
     if ranks_list is None:
         raise MappingError("missing ranks in args for zorder")
@@ -255,8 +255,8 @@ def _make_zorder(column: Column):
     return zorder
 
 
-def _make_enumerate(column: Column):
-    values = _enum_arg(column, "values")
+def make_enumerate(column: Column):
+    values = enum_arg(column, "values")
 
     def enumerate_(val, c):
         if column.key:
@@ -266,7 +266,7 @@ def _make_enumerate(column: Column):
     return enumerate_
 
 
-def _make_suffix_replace(column: Column):
+def make_suffix_replace(column: Column):
     changes = column.args.get("suffixes")
     if changes is None:
         raise MappingError("missing suffixes in args for string_suffixreplace")
@@ -282,7 +282,7 @@ def _make_suffix_replace(column: Column):
     return suffix
 
 
-def _make_categorize_int(column: Column):
+def make_categorize_int(column: Column):
     values = column.args.get("values")
     if values is None:
         raise MappingError("missing 'values' in 'args' for categorize_int")
@@ -309,47 +309,47 @@ def _make_categorize_int(column: Column):
     return categorize
 
 
-def _member_id(m: MemberCtx):
+def member_id_value(m: MemberCtx):
     return m.member_id
 
 
-def _member_role(m: MemberCtx):
+def member_role_value(m: MemberCtx):
     return m.role
 
 
-def _member_type(m: MemberCtx):
+def member_type_value(m: MemberCtx):
     return m.member_type
 
 
-def _member_index(m: MemberCtx):
+def member_index_value(m: MemberCtx):
     return m.index
 
 
 # name -> (value type, value function or None, factory or None, member function or None)
 TYPES: dict[str, tuple[str, Callable | None, Callable | None, Callable | None]] = {
-    "bool": ("bool", _bool, None, None),
-    "boolint": ("int8", _boolint, None, None),
-    "id": ("int64", _id, None, None),
-    "string": ("string", _string, None, None),
-    "direction": ("int8", _direction, None, None),
-    "integer": ("int32", _integer, None, None),
-    "mapping_key": ("string", _key, None, None),
-    "mapping_value": ("string", _value, None, None),
-    "member_id": ("int64", None, None, _member_id),
-    "member_role": ("string", None, None, _member_role),
-    "member_type": ("int8", None, None, _member_type),
-    "member_index": ("int32", None, None, _member_index),
-    "geometry": ("geometry", _geometry, None, None),
-    "validated_geometry": ("validated_geometry", _geometry, None, None),
-    "hstore_tags": ("hstore_string", None, _make_hstore, None),
-    "wayzorder": ("int32", None, _make_wayzorder, None),
-    "pseudoarea": ("float32", _area, None, None),
-    "area": ("float32", _area, None, None),
-    "webmerc_area": ("float32", _webmerc_area, None, None),
-    "zorder": ("int32", None, _make_zorder, None),
-    "enumerate": ("int32", None, _make_enumerate, None),
-    "string_suffixreplace": ("string", None, _make_suffix_replace, None),
-    "categorize_int": ("int32", None, _make_categorize_int, None),
+    "bool": ("bool", bool_value, None, None),
+    "boolint": ("int8", boolint_value, None, None),
+    "id": ("int64", id_value, None, None),
+    "string": ("string", string_value, None, None),
+    "direction": ("int8", direction_value, None, None),
+    "integer": ("int32", integer_value, None, None),
+    "mapping_key": ("string", matched_key, None, None),
+    "mapping_value": ("string", matched_value, None, None),
+    "member_id": ("int64", None, None, member_id_value),
+    "member_role": ("string", None, None, member_role_value),
+    "member_type": ("int8", None, None, member_type_value),
+    "member_index": ("int32", None, None, member_index_value),
+    "geometry": ("geometry", geometry_value, None, None),
+    "validated_geometry": ("validated_geometry", geometry_value, None, None),
+    "hstore_tags": ("hstore_string", None, make_hstore, None),
+    "wayzorder": ("int32", None, make_wayzorder, None),
+    "pseudoarea": ("float32", area_value, None, None),
+    "area": ("float32", area_value, None, None),
+    "webmerc_area": ("float32", webmerc_area_value, None, None),
+    "zorder": ("int32", None, make_zorder, None),
+    "enumerate": ("int32", None, make_enumerate, None),
+    "string_suffixreplace": ("string", None, make_suffix_replace, None),
+    "categorize_int": ("int32", None, make_categorize_int, None),
 }
 UNSUPPORTED = {"geojson_intersects", "geojson_intersects_feature"}
 

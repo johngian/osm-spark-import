@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 
-from .settings import Settings
+from osm_spark_import import outbox, state, tables
+from osm_spark_import.diffs import run as run_diffs
+from osm_spark_import.imports import rebuild, run_import
+from osm_spark_import.settings import Settings
+from osm_spark_import.spark import Storage, session
 
 
 def status(s: Settings) -> None:
-    from . import outbox, state, tables
-    from .spark import Storage, session
-
     spark = session("osm-spark-import status")
     fs = Storage(spark)
     st = state.load(fs, s)
@@ -48,16 +49,10 @@ def main(argv: list[str] | None = None) -> None:
     s = Settings.from_env()
 
     if args.cmd == "import":
-        from .imports import run_import
-
         run_import(s, args.pbf, sequence=args.sequence)
     elif args.cmd == "rebuild":
-        from .imports import rebuild
-
         rebuild(s)
     elif args.cmd == "run":
-        from .diffs import run as run_diffs
-
         run_diffs(s, loop=args.loop, max_diffs=args.max_diffs, until=args.until)
     elif args.cmd == "status":
         status(s)

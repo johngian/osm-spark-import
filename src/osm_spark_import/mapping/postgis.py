@@ -100,7 +100,7 @@ class Generalized:
         """Source.Generalizations: every generalized table derived from table."""
         return [n for n in self.order() if self.root(n) == table]
 
-    def _select(self, name: str) -> str:
+    def select_sql(self, name: str) -> str:
         g = self.gen[name]
         tol = f"{g['tolerance']:f}"  # 6 decimals
         cols = []
@@ -121,7 +121,7 @@ class Generalized:
         g = self.gen[name]
         where = f" WHERE {g['sql_filter']}" if g["sql_filter"] else ""
         return (
-            f"CREATE TABLE {q(schema)}.{q(name)} AS (SELECT {self._select(name)} "
+            f"CREATE TABLE {q(schema)}.{q(name)} AS (SELECT {self.select_sql(name)} "
             f"FROM {q(schema)}.{q(g['source'])}{where})"
         )
 
@@ -132,7 +132,7 @@ class Generalized:
         where = f" WHERE {q(idc)} = %s"
         if g["sql_filter"]:
             where += f" AND ({g['sql_filter']})"
-        return f"INSERT INTO {q(schema)}.{q(name)} (SELECT {self._select(name)} FROM {q(schema)}.{q(g['source'])}{where})"
+        return f"INSERT INTO {q(schema)}.{q(name)} (SELECT {self.select_sql(name)} FROM {q(schema)}.{q(g['source'])}{where})"
 
     def delete_sql(self, schema: str, name: str) -> str:
         idc = id_column(self.tables[self.root(name)]["columns"])

@@ -8,9 +8,10 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructField, StructType, _parse_datatype_string
 
-from . import osm, outbox
-from .settings import Settings
-from .spark import Storage
+from osm_spark_import import osm, outbox
+from osm_spark_import.mapping.columns import VALUE_TYPES
+from osm_spark_import.settings import Settings
+from osm_spark_import.spark import Storage
 
 CHUNK_MB = 32  # default; OSM_CHUNK_MB
 ELEMENT_SCHEMA = (
@@ -33,7 +34,7 @@ def decode_pbf_chunks(spark: SparkSession, chunks_dir: str, chunk_mb: int = CHUN
     return raw.mapInArrow(osm.decode_chunks, ELEMENT_SCHEMA)
 
 
-def _has_key(keys: list[str] | None):
+def has_key(keys: list[str] | None):
     """Raw tags contain one of keys (None: any tagged element)."""
     tagged = F.size("tags") > 0
     if keys is None:
@@ -41,7 +42,7 @@ def _has_key(keys: list[str] | None):
     return tagged & F.arrays_overlap(F.map_keys("tags"), F.array(*[F.lit(k) for k in keys]))
 
 
-def _targets(df: DataFrame, ids: DataFrame | None) -> DataFrame:
+def select_targets(df: DataFrame, ids: DataFrame | None) -> DataFrame:
     return df if ids is None else df.join(ids.select("id").distinct(), "id", "left_semi")
 
 
@@ -70,10 +71,10 @@ def work_units(
     coord = F.struct(F.col("nid").alias("id"), "lon", "lat")
     coords = nodes.select(F.col("id").alias("nid"), "lon", "lat")
 
-    tn = _targets(nodes.filter(_has_key(mp.target_keys("n"))), node_ids)
+    tn = select_targets(nodes.filter(has_key(mp.target_keys("n"))), node_ids)
     node_units = tn.select(F.lit("n").alias("k"), "id", "tags", "lon", "lat")
 
-    tw = _targets(ways.filter(_has_key(mp.target_keys("w"))), way_ids)
+    tw = select_targets(ways.filter(has_key(mp.target_keys("w"))), way_ids)
     wcoords = (
         tw.select(F.col("id").alias("wid"), F.explode("refs").alias("nid"))
         .distinct()
@@ -87,7 +88,7 @@ def work_units(
         .select(F.lit("w").alias("k"), F.col("wid").alias("id"), "tags", "refs", "nodes")
     )
 
-    tr = _targets(rels.filter(_has_key(mp.target_keys("r"))), rel_ids)
+    tr = select_targets(rels.filter(has_key(mp.target_keys("r"))), rel_ids)
     m = tr.select(F.col("id").alias("rid"), F.explode("members").alias("m")).select(
         "rid", F.col("m.type").alias("mtype"), F.col("m.ref").alias("mref")
     )
@@ -193,7 +194,6 @@ def build(
 
 def table_schema(spec: dict) -> StructType:
     """Spark types of the non-geometry columns of a table spec."""
-    from .mapping.columns import VALUE_TYPES
 
     return StructType(
         [
