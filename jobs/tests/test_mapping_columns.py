@@ -1,3 +1,4 @@
+# Derived from imposm3 (Apache License 2.0), translated to Python and modified. See NOTICE.
 """Column value functions."""
 
 import numpy as np

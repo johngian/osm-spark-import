@@ -93,3 +93,9 @@ docker compose run --rm client sh -c 'cd /opt/osm-hadoop/jobs && python -m pytes
 
 End to end, an import plus diffs must give the same tables as an import of
 the newer data ([docs/design.md](docs/design.md#6-verification)).
+
+## Acknowledgements
+
+Influenced by [imposm3](https://github.com/omniscale/imposm3) (Apache License
+2.0). The mapping engine and its tests are derived from it; see
+[NOTICE](NOTICE).

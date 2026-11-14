@@ -1,3 +1,4 @@
+# Derived from imposm3 (Apache License 2.0), translated to Python and modified. See NOTICE.
 """Multipolygons and ring merging.
 
 Ways are (way id, refs, nodes) with node coordinates used as they are (no

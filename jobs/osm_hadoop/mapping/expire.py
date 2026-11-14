@@ -1,3 +1,4 @@
+# Derived from imposm3 (Apache License 2.0), translated to Python and modified. See NOTICE.
 """Expired tiles.
 
 Tiles are "z/x/y" strings; the loader writes them to files

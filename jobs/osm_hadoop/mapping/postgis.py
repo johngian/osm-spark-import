@@ -1,3 +1,4 @@
+# Derived from imposm3 (Apache License 2.0), translated to Python and modified. See NOTICE.
 """The SQL.
 
 Everything is generated from the batch manifest's table specs, so the loader

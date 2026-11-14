@@ -1,3 +1,4 @@
+# Copied from imposm3 (Apache License 2.0). See NOTICE.
 areas:
   area_tags: [buildings, landuse, leisure, natural, aeroway]
   linear_tags: [highway, barrier]

@@ -1,3 +1,4 @@
+# Derived from imposm3 (Apache License 2.0), translated to Python and modified. See NOTICE.
 """Tag filters, matchers and table filters."""
 
 from pathlib import Path

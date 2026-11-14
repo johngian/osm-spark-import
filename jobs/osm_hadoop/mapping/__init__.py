@@ -1,3 +1,4 @@
+# Derived from imposm3 (Apache License 2.0), translated to Python and modified. See NOTICE.
 """The mapping engine: from a mapping file and OSM elements to table rows.
 
     config    the mapping file: tables, mappings, filters, columns, generalized tables

@@ -1,3 +1,4 @@
+# Derived from imposm3 (Apache License 2.0), translated to Python and modified. See NOTICE.
 """Coordinates and geometries.
 
 Coordinates: the cache keeps coordinates as uint32 values (truncated from

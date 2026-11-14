@@ -1,3 +1,4 @@
+# Derived from imposm3 (Apache License 2.0), translated to Python and modified. See NOTICE.
 """Which tables an element goes into.
 
 A match is (key, value, table, sub-mapping): one per table and sub-mapping,

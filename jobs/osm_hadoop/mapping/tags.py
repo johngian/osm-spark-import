@@ -1,3 +1,4 @@
+# Derived from imposm3 (Apache License 2.0), translated to Python and modified. See NOTICE.
 """Tag filters applied when elements are cached.
 
 With tags.load_all, every tag is kept except those in tags.exclude (keys or

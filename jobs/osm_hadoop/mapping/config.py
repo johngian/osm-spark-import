@@ -1,3 +1,4 @@
+# Derived from imposm3 (Apache License 2.0), translated to Python and modified. See NOTICE.
 """The mapping file (YAML or JSON).
 
 Mapping values keep their order: when an element matches a table more than

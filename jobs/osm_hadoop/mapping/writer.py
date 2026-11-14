@@ -1,3 +1,4 @@
+# Derived from imposm3 (Apache License 2.0), translated to Python and modified. See NOTICE.
 """Rows of nodes, ways and relations, and expired tiles.
 
 A Builder gets a batch of work units: target elements and everything their
