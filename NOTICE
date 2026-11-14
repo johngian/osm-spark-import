@@ -2,7 +2,7 @@ osm-hadoop-import
 
 Influenced by imposm3 (https://github.com/omniscale/imposm3), written and
 maintained by Omniscale (see imposm3's AUTHORS), licensed under the Apache
-License 2.0 (LICENSES/Apache-2.0.txt).
+License 2.0 (LICENSE).
 
 Derived from imposm3:
 - jobs/osm_hadoop/mapping/: mapping, geometry, tile expiry and PostGIS logic,

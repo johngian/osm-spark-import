@@ -3,6 +3,7 @@ name = "osm-hadoop"
 version = "0.2.0"
 description = "OSM import pipeline on Hadoop/HDFS: pyosmium, Parquet, PostgreSQL"
 requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
 # pyspark is installed by the image, in the version the cluster runs
 dependencies = [
   "osmium==4.3.2",
