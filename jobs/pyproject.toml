@@ -20,6 +20,9 @@ dependencies = [
 test = ["pytest"]
 dev = ["black==24.10.0", "isort==5.13.2", "ruff==0.8.4"]
 
+[project.scripts]
+osm-hadoop = "osm_hadoop.cli:main"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
