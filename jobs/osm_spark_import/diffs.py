@@ -35,7 +35,6 @@ from pyspark.sql import functions as F
 
 from . import outbox, pipeline, state, tables
 from .imports import download, log
-from .mapping import geom as igeom
 from .settings import Settings
 from .spark import Storage, session
 
@@ -47,8 +46,8 @@ CHANGE = pa.schema(
         ("version", pa.int64()),
         ("k", pa.string()),
         ("id", pa.int64()),
-        ("qlon", pa.int64()),
-        ("qlat", pa.int64()),
+        ("lon", pa.int32()),
+        ("lat", pa.int32()),
         ("tags", pa.map_(pa.string(), pa.string())),
         ("refs", pa.list_(pa.int64())),
         ("members", pa.list_(pa.struct([("type", pa.string()), ("ref", pa.int64()), ("role", pa.string())]))),
@@ -62,7 +61,7 @@ class _Changes(osmium.SimpleHandler):
         self.seq = seq
         self.rows: dict[str, list] = {n: [] for n in CHANGE.names}
 
-    def _add(self, o, k, qlon=None, qlat=None, refs=None, members=None):
+    def _add(self, o, k, lon=None, lat=None, refs=None, members=None):
         r = self.rows
         r["a"].append("d" if o.deleted else "m")
         r["seq"].append(self.seq)
@@ -70,8 +69,8 @@ class _Changes(osmium.SimpleHandler):
         r["version"].append(o.version)
         r["k"].append(k)
         r["id"].append(o.id)
-        r["qlon"].append(qlon)
-        r["qlat"].append(qlat)
+        r["lon"].append(lon)
+        r["lat"].append(lat)
         r["tags"].append([(t.k, t.v) for t in o.tags] if len(o.tags) else None)
         r["refs"].append(refs)
         r["members"].append(members)
@@ -81,7 +80,7 @@ class _Changes(osmium.SimpleHandler):
         if n.deleted or not loc.valid():
             self._add(n, "n")
         else:
-            self._add(n, "n", igeom.q_osc(loc.x), igeom.q_osc(loc.y))
+            self._add(n, "n", loc.x, loc.y)
 
     def way(self, w):
         self._add(w, "w", refs=None if w.deleted else [r.ref for r in w.nodes])
@@ -298,7 +297,7 @@ def merge_cache(spark: SparkSession, s: Settings, final: DataFrame, old: dict, s
     rels = final.filter("k = 'r'")
     # read the old tables before changing them
     src = {
-        "nodes": final.filter("k = 'n'").select("id", "a", "qlon", "qlat", "tags"),
+        "nodes": final.filter("k = 'n'").select("id", "a", "lon", "lat", "tags"),
         "ways": ways.select("id", "a", "tags", "refs"),
         "relations": rels.select("id", "a", "tags", "members"),
         "way_nodes": _pair_delta(
@@ -324,8 +323,8 @@ def merge_cache(spark: SparkSession, s: Settings, final: DataFrame, old: dict, s
         """
         MERGE INTO {t} t USING {s} s ON t.id = s.id
         WHEN MATCHED AND s.a = 'd' THEN DELETE
-        WHEN MATCHED THEN UPDATE SET t.qlon = s.qlon, t.qlat = s.qlat, t.tags = s.tags
-        WHEN NOT MATCHED AND s.a != 'd' THEN INSERT (id, qlon, qlat, tags) VALUES (s.id, s.qlon, s.qlat, s.tags)""",
+        WHEN MATCHED THEN UPDATE SET t.lon = s.lon, t.lat = s.lat, t.tags = s.tags
+        WHEN NOT MATCHED AND s.a != 'd' THEN INSERT (id, lon, lat, tags) VALUES (s.id, s.lon, s.lat, s.tags)""",
     )
     _merge(
         spark,

@@ -8,7 +8,6 @@ numpy.float32).
 
 from __future__ import annotations
 
-import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,8 +15,12 @@ from typing import Any
 
 import numpy as np
 import shapely
+from pyproj import Geod
 
+from . import geom
 from .config import Column, MappingError
+
+_GEOD = Geod(ellps="WGS84")
 
 # value type -> (PostgreSQL type, Arrow/Spark type)
 VALUE_TYPES = {
@@ -86,6 +89,7 @@ class Ctx:
     geom: Any  # shapely geometry or None
     match_key: str
     match_value: str
+    srid: int = 3857
 
 
 @dataclass
@@ -151,16 +155,13 @@ def _area(val, c):
 
 
 def _webmerc_area(val, c):
+    """Geodesic area in m² (WGS84 ellipsoid)."""
     if c.geom is None:
         return None
-    a = float(shapely.area(c.geom))
+    a = abs(_GEOD.geometry_area_perimeter(geom.to_wgs84(c.geom, c.srid))[0])
     if a == 0.0:
         return None
-    minx, miny, maxx, maxy = shapely.bounds(c.geom)
-    mid_y = miny + (maxy - miny) / 2
-    pole = 6378137 * math.pi
-    mid_lat = 2 * math.atan(math.exp((mid_y / pole) * math.pi)) - math.pi / 2
-    return np.float32(a * math.pow(math.cos(mid_lat), 2))
+    return np.float32(a)
 
 
 def _hstore_escape(s: str) -> str:

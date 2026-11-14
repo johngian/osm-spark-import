@@ -1,6 +1,6 @@
 """The cache: Iceberg tables, one namespace per import.
 
-    nodes(id, qlon, qlat, tags)          every node; coordinates as uint32 (mapping.geom)
+    nodes(id, lon, lat, tags)            every node; coordinates in 1e-7 degrees
     ways(id, tags, refs)                 every way
     relations(id, tags, members)         every relation; member type n/w/r
     way_nodes(node_id, way_id)           index: node -> ways
@@ -55,7 +55,7 @@ def rel_members(rels: DataFrame) -> DataFrame:
 
 def write_cache(s: Settings, elems: DataFrame) -> None:
     """Replace the cache and index tables with decoded elements."""
-    nodes = elems.filter("k = 'n'").select("id", "qlon", "qlat", "tags")
+    nodes = elems.filter("k = 'n'").select("id", "lon", "lat", "tags")
     ways = elems.filter("k = 'w'").select("id", "tags", "refs")
     rels = elems.filter("k = 'r'").select("id", "tags", "members")
     replace(nodes, s, "nodes", "id")

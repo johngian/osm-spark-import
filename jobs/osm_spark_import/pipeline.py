@@ -14,7 +14,7 @@ from .spark import Storage
 
 CHUNK_MB = 32  # default; OSM_CHUNK_MB
 ELEMENT_SCHEMA = (
-    "k string, id bigint, qlon bigint, qlat bigint, tags map<string,string>, refs array<bigint>, "
+    "k string, id bigint, lon int, lat int, tags map<string,string>, refs array<bigint>, "
     "members array<struct<type:string,ref:bigint,role:string>>"
 )
 ROW_SCHEMA = "tbl string, id bigint, g boolean, vals string, geom binary, tile string"
@@ -60,18 +60,18 @@ def work_units(
     changed: per kind (n, w, r), the IDs changed by a diff; adds a boolean
     column "changed" (the others are dependents).
 
-    Columns: k, id, tags, qlon, qlat (nodes), refs (ways), members
+    Columns: k, id, tags, lon, lat (nodes), refs (ways), members
     (relations), nodes (coordinates: of a way's nodes; of a relation's
     member ways' nodes and member nodes), ways (member ways: id, tags, refs),
     mnodes (tagged member nodes), rels (member relations).
     Targets: tagged elements with a key the mapping matches on (all of them,
     or those in the *_ids DataFrames).
     """
-    coord = F.struct(F.col("nid").alias("id"), "qlon", "qlat")
-    coords = nodes.select(F.col("id").alias("nid"), "qlon", "qlat")
+    coord = F.struct(F.col("nid").alias("id"), "lon", "lat")
+    coords = nodes.select(F.col("id").alias("nid"), "lon", "lat")
 
     tn = _targets(nodes.filter(_has_key(mp.target_keys("n"))), node_ids)
-    node_units = tn.select(F.lit("n").alias("k"), "id", "tags", "qlon", "qlat")
+    node_units = tn.select(F.lit("n").alias("k"), "id", "tags", "lon", "lat")
 
     tw = _targets(ways.filter(_has_key(mp.target_keys("w"))), way_ids)
     wcoords = (
@@ -117,14 +117,14 @@ def work_units(
     rmnodes = (
         node_refs.join(
             nodes.filter(F.size("tags") > 0).select(
-                F.col("id").alias("nid"), F.col("tags").alias("ntags"), "qlon", "qlat"
+                F.col("id").alias("nid"), F.col("tags").alias("ntags"), "lon", "lat"
             ),
             "nid",
         )
         .groupBy("rid")
         .agg(
             F.collect_list(
-                F.struct(F.col("nid").alias("id"), F.col("ntags").alias("tags"), "qlon", "qlat")
+                F.struct(F.col("nid").alias("id"), F.col("ntags").alias("tags"), "lon", "lat")
             ).alias("mnodes")
         )
     )

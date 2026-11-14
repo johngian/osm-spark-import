@@ -24,16 +24,16 @@ from osm_spark_import.mapping.expire import TileList
         ([(8.30, 53.25), (8.30, 53.27), (8.30, 53.29), (8.30, 53.30)], 5, 14, False),
         # L-shape
         ([(8.30, 53.25), (8.30, 53.30), (8.35, 53.30)], 8, 14, False),
-        # line (triangle)
-        ([(8.30, 53.25), (8.30, 53.30), (8.35, 53.30), (8.30, 53.25)], 11, 14, False),
+        # line (triangle): every tile the line crosses
+        ([(8.30, 53.25), (8.30, 53.30), (8.35, 53.30), (8.30, 53.25)], 12, 14, False),
         # same line but closed/polygon (triangle), whole bbox (4x5 tiles) is expired
         ([(8.30, 53.25), (8.30, 53.30), (8.35, 53.30), (8.30, 53.25)], 20, 14, True),
         # large triangle, moved zoom level up
         ([(8.30, 53.25), (8.30, 53.90), (8.85, 53.90), (8.30, 53.25)], 28, 11, True),
         # same large triangle but as line, moved just one zoom level up
-        ([(8.30, 53.25), (8.30, 53.90), (8.85, 53.90), (8.30, 53.25)], 63, 13, False),
+        ([(8.30, 53.25), (8.30, 53.90), (8.85, 53.90), (8.30, 53.25)], 74, 13, False),
         # long line, accross world
-        ([(-170, -80), (170, 80)], 17, 4, False),
+        ([(-170, -80), (170, 80)], 30, 4, False),
         # large polygon, accross world
         ([(-160, -70), (160, -70), (160, 70), (-160, 70)], 48, 3, True),
         # expire tiles use Webmercator, ignore nodes at the poles
@@ -48,7 +48,8 @@ def test_tile_list_expire_nodes_adaptive(nodes, expected_num, expected_level, cl
     tl.expire_nodes([(float(x), float(y)) for x, y in nodes], closed)
     for z in range(tl.max_zoom + 1):
         expected = expected_num if z == expected_level else 0
-        assert len(tl.tiles[z]) == expected, (z, sorted(tl.tiles[z]))
+        tiles = sorted(t for t in tl.tiles if t[2] == z)
+        assert len(tiles) == expected, (z, tiles)
     lines = tl.as_strings()
     for line in lines:
         assert re.fullmatch(r"\d+/\d+/\d+", line), line

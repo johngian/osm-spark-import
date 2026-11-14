@@ -98,7 +98,7 @@ relations without tags left are ignored.
 | `mapping_key`, `mapping_value` | the matched key / value | VARCHAR |
 | `hstore_tags` | all tags (`args.include`: only these keys) | HSTORE |
 | `area`, `pseudoarea` | geometry area in SRID units, NULL if 0 | REAL |
-| `webmerc_area` | area scaled by cos² of the latitude | REAL |
+| `webmerc_area` | geodesic area in m² (WGS84 ellipsoid), NULL if 0 | REAL |
 | `enumerate` | position (1-based) of the matched value (or of tag `key`) in `args.values`, else 0 | INT |
 | `wayzorder` | layer × 10 + road rank (+7 for railways) ± 10 for bridge/tunnel; `args.ranks`/`args.default` for custom ranks | INT |
 | `zorder` | rank from `args.ranks` (first = highest) of the matched value or tag `args.key` | INT |

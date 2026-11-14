@@ -12,12 +12,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import shapely
 
 from . import geom as g
 from .columns import ColumnSpec, Ctx, MemberCtx, column_spec
 from .config import Config
-from .expire import TileList, expire_projected_node, expire_projected_nodes
+from .expire import TileList
 from .match import Match, is_closed, matchers
 from .tags import node_filter, relation_filter, way_filter
 
@@ -119,14 +120,14 @@ class Builder:
 
     def _fill_cache(self, units: list[dict]):
         mp = self.mp
-        coords: dict[int, tuple[int, int]] = {}
+        coords: dict[int, tuple[int, int]] = {}  # 1e-7 degrees
         nodes: dict[int, dict] = {}  # tags (non-empty after filtering)
         ways: dict[int, tuple[dict, list[int]]] = {}
         rels: dict[int, tuple[dict, list]] = {}
         targets = {"n": [], "w": [], "r": []}
 
-        def put_node(id_, tags, qlon, qlat):
-            coords[id_] = (qlon, qlat)
+        def put_node(id_, tags, lon, lat):
+            coords[id_] = (lon, lat)
             t = mp.node_filter.filter(_tags(tags))
             if t:
                 nodes[id_] = t
@@ -146,20 +147,28 @@ class Builder:
             if u.get("changed", True) is not False:
                 self.changed[k].add(u["id"])
             for c in u.get("nodes") or []:
-                coords[c["id"]] = (c["qlon"], c["qlat"])
+                coords[c["id"]] = (c["lon"], c["lat"])
             if k == "n":
-                put_node(u["id"], u["tags"], u["qlon"], u["qlat"])
+                put_node(u["id"], u["tags"], u["lon"], u["lat"])
             elif k == "w":
                 put_way(u["id"], u["tags"], u["refs"])
             else:
                 for w in u.get("ways") or []:
                     put_way(w["id"], w["tags"], w["refs"])
                 for n in u.get("mnodes") or []:
-                    put_node(n["id"], n["tags"], n["qlon"], n["qlat"])
+                    put_node(n["id"], n["tags"], n["lon"], n["lat"])
                 for r in u.get("rels") or []:
                     put_rel(r["id"], r["tags"], r["members"])
                 put_rel(u["id"], u["tags"], u["members"])
-        self.coords, self.nodes, self.ways, self.rels = coords, nodes, ways, rels
+        self.nodes, self.ways, self.rels = nodes, ways, rels
+        ids = list(coords)
+        e7 = np.array([coords[i] for i in ids], dtype=np.float64).reshape(-1, 2)
+        lons, lats = e7[:, 0] / 1e7, e7[:, 1] / 1e7
+        xs, ys = g.project(lons, lats, self.srid)
+        self.wgs = dict(zip(ids, zip(lons.tolist(), lats.tolist(), strict=True), strict=True))
+        self.coords = dict(
+            zip(ids, zip(np.asarray(xs).tolist(), np.asarray(ys).tolist(), strict=True), strict=True)
+        )
         return targets
 
     def _fill(self, refs: list[int]) -> list[tuple[float, float]] | None:
@@ -169,25 +178,18 @@ class Builder:
             c = self.coords.get(r)
             if c is None:
                 return None
-            out.append(g.to_srid(c[0], c[1], self.srid))
+            out.append(c)
         return out
 
-    def _fill_wgs(self, refs: list[int]) -> list[tuple[float, float]]:
-        """FillWay in WGS84 for the deleter: stops at the first missing node,
-        the rest stays (0, 0)."""
-        out = []
-        for r in refs:
-            c = self.coords.get(r)
-            if c is None:
-                break
-            out.append((g.int_to_coord(c[0]), g.int_to_coord(c[1])))
-        return out + [(0.0, 0.0)] * (len(refs) - len(out))
+    def _wgs(self, refs: list[int]) -> list[tuple[float, float]]:
+        """WGS84 coordinates for expiring; missing nodes left out."""
+        return [self.wgs[r] for r in refs if r in self.wgs]
 
     # --- rows ------------------------------------------------------------------
 
     def _insert(self, matches: list[Match], tags: dict, elem_id: int, geom, gen: bool) -> None:
         for m in matches:
-            ctx = Ctx(tags, elem_id, geom, m.key, m.value)
+            ctx = Ctx(tags, elem_id, geom, m.key, m.value, self.srid)
             self.rows.append(Row(m.table, elem_id, gen, [c.value(ctx) for c in self.mp.columns[m.table]]))
 
     def process(self, units: list[dict]) -> None:
@@ -210,10 +212,9 @@ class Builder:
         matches = self.mp.m.point.match_node(tags)
         if not matches:
             return
-        x, y = g.to_srid(*self.coords[id_], self.srid)
-        self._insert(matches, tags, id_, g.point(x, y), False)
+        self._insert(matches, tags, id_, g.point(*self.coords[id_]), False)
         if self.tiles is not None:
-            expire_projected_node(self.tiles, x, y, self.srid)
+            self.tiles.expire(*self.wgs[id_])
 
     def _way(self, id_: int) -> None:
         w = self.ways.get(id_)
@@ -250,7 +251,7 @@ class Builder:
                 self._insert(poly_matches, tags, self.mp.way_id(id_), geom, True)
                 inserted_polygon = True
         if (inserted or inserted_polygon) and self.tiles is not None:
-            expire_projected_nodes(self.tiles, nodes, self.srid, inserted_polygon)
+            self.tiles.expire_nodes(self._wgs(refs), inserted_polygon)
 
     def _relation(self, id_: int) -> None:
         r = self.rels.get(id_)
@@ -259,7 +260,7 @@ class Builder:
         tags, members = r
         # FillMembers, then FillWay for every way member: a missing way or
         # coordinate skips the relation
-        member_ways: dict[int, tuple[dict, list[int], list]] = {}
+        member_ways: dict[int, tuple[dict, list[int], list]] = {}  # tags, refs, coordinates
         for mem in members:
             if mem["type"] != "w":
                 continue
@@ -287,11 +288,7 @@ class Builder:
         if poly_matches:
             try:
                 geom = g.multipolygon(
-                    [
-                        (m["ref"], member_ways[m["ref"]][1], member_ways[m["ref"]][2])
-                        for m in members
-                        if m["type"] == "w"
-                    ],
+                    [member_ways[m["ref"]][2] for m in members if m["type"] == "w"],
                     self.mp.max_gap,
                 )
                 self._insert(poly_matches, tags, rel_id, geom, True)
@@ -301,7 +298,7 @@ class Builder:
         if inserted and self.tiles is not None:
             for mem in members:
                 if mem["type"] == "w":
-                    expire_projected_nodes(self.tiles, member_ways[mem["ref"]][2], self.srid, True)
+                    self.tiles.expire_nodes(self._wgs(member_ways[mem["ref"]][1]), True)
 
     def _relation_members(self, id_, rel_id, tags, members, member_ways) -> bool:
         """handleRelationMembers: True if succeeded (rows may be partial on failure)."""
@@ -324,7 +321,7 @@ class Builder:
                     return False
                 ntags = self.nodes.get(ref, {})
                 elements.append(Ctx(ntags, ref, None, "", ""))
-                geoms.append(g.to_srid(c[0], c[1], self.srid))
+                geoms.append(c)
             else:
                 elements.append(Ctx(member_ways[ref][0], ref, None, "", ""))
                 geoms.append(None)
@@ -342,13 +339,13 @@ class Builder:
                 geom = g.EMPTY_POLYGON
             el = elements[mi]
             for m in matches:
-                rel_ctx = Ctx(tags, rel_id, geom, m.key, m.value)
+                rel_ctx = Ctx(tags, rel_id, geom, m.key, m.value, self.srid)
                 member = MemberCtx(
                     mem["ref"],
                     MEMBER_TYPES[t],
                     mem["role"] or "",
                     mi,
-                    Ctx(el.tags, el.elem_id, geom, m.key, m.value),
+                    Ctx(el.tags, el.elem_id, geom, m.key, m.value, self.srid),
                 )
                 self.rows.append(
                     Row(m.table, rel_id, True, [c.member_value(rel_ctx, member) for c in cols[m.table]])
@@ -385,7 +382,7 @@ class Builder:
                 w = self.ways.get(mem["ref"])
                 if w is None:
                     break
-                tl.expire_nodes(self._fill_wgs(w[1]), polygon)
+                tl.expire_nodes(self._wgs(w[1]), polygon)
         for id_ in targets["w"]:
             w = self.ways.get(id_)
             if w is None or not w[0]:
@@ -396,12 +393,11 @@ class Builder:
                 continue
             if id_ not in self.changed["w"] and any(r not in self.coords for r in refs):
                 continue
-            tl.expire_nodes(self._fill_wgs(refs), polygon)
+            tl.expire_nodes(self._wgs(refs), polygon)
         for id_ in targets["n"]:
             tags = self.nodes.get(id_)
             if tags and m.point.match_node(tags):
-                c = self.coords[id_]
-                tl.expire(g.int_to_coord(c[0]), g.int_to_coord(c[1]))
+                tl.expire(*self.wgs[id_])
 
     def _relation_complete(self, members) -> bool:
         for mem in members:

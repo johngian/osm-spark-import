@@ -83,9 +83,9 @@ Expired tiles are written as `DIR/YYYYMMDD/HHMMSS.mmm.tiles` (`z/x/y` lines).
 
 ## Tests
 
-Unit tests run in the image build (196: mapping file, filters, matchers,
-column values, geometries and multipolygons, ring merging, tile lists, PBF
-splitting, SQL, CSV for COPY):
+Unit tests run in the image build (177: mapping file, filters, matchers,
+column values, geometries and multipolygons, tile lists, PBF splitting, SQL,
+CSV for COPY):
 
 ```sh
 docker compose run --rm client sh -c 'cd /opt/osm-spark-import/jobs && python -m pytest tests'

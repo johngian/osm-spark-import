@@ -1,6 +1,7 @@
 import json
 import os
 
+import numpy as np
 import osmium
 import pyarrow as pa
 import shapely
@@ -19,14 +20,14 @@ def mp():
 
 
 def q(lon, lat):
-    return geom.q_pbf(round(lon * 1e7)), geom.q_pbf(round(lat * 1e7))
+    return round(lon * 1e7), round(lat * 1e7)
 
 
 def coords(*pts):
     out = []
     for i, lon, lat in pts:
-        qlon, qlat = q(lon, lat)
-        out.append({"id": i, "qlon": qlon, "qlat": qlat})
+        x, y = q(lon, lat)
+        out.append({"id": i, "lon": x, "lat": y})
     return out
 
 
@@ -34,8 +35,8 @@ SQUARE = coords((1, 10.0, 50.0), (2, 10.01, 50.0), (3, 10.01, 50.01), (4, 10.0, 
 
 
 def node(i, lon, lat, tags):
-    qlon, qlat = q(lon, lat)
-    return {"k": "n", "id": i, "tags": list(tags.items()), "qlon": qlon, "qlat": qlat}
+    x, y = q(lon, lat)
+    return {"k": "n", "id": i, "tags": list(tags.items()), "lon": x, "lat": y}
 
 
 def way(i, tags, refs, nodes=SQUARE):
@@ -67,13 +68,8 @@ def rows(units):
 
 
 def test_coordinates():
-    # uint32 coordinates (truncating), from the parser's float
-    assert geom.coord_to_int(0.0) == 2147483647
-    assert geom.int_to_coord(geom.coord_to_int(180.0)) - 180.0 < 1e-7
-    assert geom.pbf_float(425325089) != 42.5325089 or geom.osc_float(425325089) == 42.5325089
-    assert geom.osc_float(-1234567890) == -123.456789
-    x, y = geom.wgs_to_merc(8, 53)
-    assert abs(x - 890555.9263461898) < 1e-6 and abs(y - 6982997.920389788) < 1e-6
+    x, y = geom.project(np.array([8.0]), np.array([53.0]), 3857)
+    assert abs(x[0] - 890555.9263461898) < 1e-6 and abs(y[0] - 6982997.920389788) < 1e-6
 
 
 def test_point_with_tags_filtered():
@@ -200,4 +196,4 @@ def test_split_and_decode(tmp_path):
     assert key(parts) == key(whole)
     nodes = {r["id"]: r for r in whole.to_pylist() if r["k"] == "n"}
     assert nodes[100]["tags"] == [("amenity", "bench")]
-    assert nodes[100]["qlon"] == geom.q_pbf(100 * 1000) and nodes[1]["tags"] is None
+    assert nodes[100]["lon"] == 100 * 1000 and nodes[1]["tags"] is None

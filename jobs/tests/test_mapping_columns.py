@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import shapely
 
+from osm_spark_import.mapping import geom
 from osm_spark_import.mapping.columns import Ctx, column_spec
 from osm_spark_import.mapping.config import Column
 
@@ -119,84 +120,72 @@ def test_way_zorder(key, tags, expected):
 
 
 @pytest.mark.parametrize(
-    "wkt,expected,type_",
+    "wkt,expected",
     [
-        ("POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))", 100.0, "area"),
-        ("POLYGON((-10 0, 10 0, 10 10, -10 10, -10 0))", 200.0, "area"),
-        ("POLYGON((-10 -10, 10 -10, 10 10, -10 10, -10 -10))", 400.0, "webmerc_area"),
+        ("POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))", 100.0),
+        ("POLYGON((-10 0, 10 0, 10 10, -10 10, -10 0))", 200.0),
         (
             "POLYGON((1000000  2000000, 1001000  2000000, 1001000  2001000, 1000000  2001000, 1000000  2000000))",
             1000000.0,
-            "area",
-        ),
-        (
-            "POLYGON((1000000  2000000, 1001000  2000000, 1001000  2001000, 1000000  2001000, 1000000  2000000))",
-            907733.750000,
-            "webmerc_area",
-        ),
-        (
-            "POLYGON((1000000  5000000, 1001000  5000000, 1001000  5001000, 1000000  5001000, 1000000  5000000))",
-            570974.687500,
-            "webmerc_area",
-        ),
-        (
-            "POLYGON((1000000 10000000, 1001000 10000000, 1001000 10001000, 1000000 10001000, 1000000 10000000))",
-            159667.406250,
-            "webmerc_area",
         ),
         (
             "POLYGON((1284931 6129149,1284931 6129153,1284931 6129174,1285008 6129171,1285008 6129155,1285008 6129146,1284931 6129149))",
             1925.000000,
-            "area",
         ),
-        (
-            "POLYGON((1284931 6129149,1284931 6129153,1284931 6129174,1285008 6129171,1285008 6129155,1285008 6129146,1284931 6129149))",
-            857.418396,
-            "webmerc_area",
-        ),
-        # 100x100m square between ~20N and ~70N transformed from UTM to Webmerc
+    ],
+)
+def test_area_column(wkt, expected):
+    # TestAreaColumn: float32 equality
+    v = func("area")("", ctx(geom=shapely.from_wkt(wkt)))
+    assert isinstance(v, np.float32)
+    assert v == np.float32(expected)
+
+
+@pytest.mark.parametrize(
+    "wkt,approx",
+    [
+        # ~100x100m squares between ~20N and ~70N; approx: area x cos²(latitude)
         (
             "POLYGON ((1212900 2099809, 1212900 2099916, 1212794 2099916, 1212794 2099809, 1212900 2099809))",
             10196.298828,
-            "webmerc_area",
         ),
         (
             "POLYGON ((1227489 3193498, 1227489 3193613, 1227374 3193613, 1227374 3193498, 1227489 3193498))",
             10394.006836,
-            "webmerc_area",
         ),
         (
             "POLYGON ((1250827 4379962, 1250827 4380090, 1250700 4380090, 1250700 4379962, 1250827 4379962))",
             10484.050781,
-            "webmerc_area",
         ),
         (
             "POLYGON ((1287373 5712461, 1287373 5712609, 1287226 5712609, 1287226 5712461, 1287373 5712461))",
             10659.601562,
-            "webmerc_area",
         ),
         (
             "POLYGON ((1346379 7276530, 1346379 7276709, 1346199 7276709, 1346199 7276530, 1346379 7276530))",
             10834.080078,
-            "webmerc_area",
         ),
         (
             "POLYGON ((1449880 9229305, 1449880 9229543, 1449643 9229543, 1449643 9229305, 1449880 9229305))",
             11212.663086,
-            "webmerc_area",
         ),
         (
             "POLYGON ((1665035 11920408, 1665035 11920770, 1664673 11920770, 1664673 11920408, 1665035 11920408))",
             11903.427734,
-            "webmerc_area",
         ),
     ],
 )
-def test_area_column(wkt, expected, type_):
-    # TestAreaColumn: float32 equality
-    v = func(type_)("", ctx(geom=shapely.from_wkt(wkt)))
+def test_webmerc_area_column(wkt, approx):
+    v = func("webmerc_area")("", ctx(geom=shapely.from_wkt(wkt)))
     assert isinstance(v, np.float32)
-    assert v == np.float32(expected)
+    assert abs(v / approx - 1) < 0.01
+
+
+def test_webmerc_area_one_degree():
+    # 1° x 1° at the equator: 12,308,778,361 m² on the WGS84 ellipsoid
+    x, y = geom.project(np.array([0.0, 1.0]), np.array([0.0, 1.0]), 3857)
+    v = func("webmerc_area")("", ctx(geom=shapely.box(x[0], y[0], x[1], y[1])))
+    assert abs(v / 12308778361 - 1) < 1e-6
 
 
 def test_make_suffix_replace():

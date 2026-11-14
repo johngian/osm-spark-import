@@ -3,8 +3,7 @@
 Both run in Spark tasks through mapInArrow (pyosmium is installed on every
 node).
 
-Coordinates are stored as uint32 values (mapping.geom q_pbf/q_osc), the
-values every geometry is built from.
+Coordinates are stored as pyosmium's fixed-point integers (1e-7 degrees).
 
 Splitting: a PBF file is a sequence of blobs ([4 byte length][BlobHeader]
 [Blob]); the first is the OSMHeader, the others can be decoded independently.
@@ -25,8 +24,6 @@ import numpy as np
 import osmium
 import pyarrow as pa
 
-from .mapping import geom as igeom
-
 # --- schemas -----------------------------------------------------------------
 
 TAGS = pa.map_(pa.string(), pa.string())
@@ -36,8 +33,8 @@ ELEMENT = pa.schema(
     [
         ("k", pa.string()),
         ("id", pa.int64()),
-        ("qlon", pa.int64()),
-        ("qlat", pa.int64()),
+        ("lon", pa.int32()),
+        ("lat", pa.int32()),
         ("tags", TAGS),
         ("refs", pa.list_(pa.int64())),
         ("members", pa.list_(MEMBER)),
@@ -154,8 +151,8 @@ class _Collector(osmium.SimpleHandler):
         c = self.cols
         c["k"].append(k)
         c["id"].append(id_)
-        c["qlon"].append(lon)
-        c["qlat"].append(lat)
+        c["lon"].append(lon)
+        c["lat"].append(lat)
         c["tags"].append([(t.k, t.v) for t in tags] if len(tags) else None)
         c["refs"].append(refs)
         c["members"].append(members)
@@ -169,7 +166,7 @@ class _Collector(osmium.SimpleHandler):
 
     def node(self, n):
         loc = n.location
-        self.add("n", n.id, igeom.q_pbf(loc.x), igeom.q_pbf(loc.y), n.tags, None, None)
+        self.add("n", n.id, loc.x, loc.y, n.tags, None, None)
 
     def way(self, w):
         self.add("w", w.id, None, None, w.tags, [r.ref for r in w.nodes], None)

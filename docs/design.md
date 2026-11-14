@@ -34,25 +34,27 @@ the database, the loader never runs Spark.
 | Module | |
 |---|---|
 | `config` | the mapping file: ordered mapping values (the first value that matches wins), repeated keys kept |
-| `tags` | tag filters applied when elements are cached: `load_all` + `exclude` (globs), or only the tags the mapping uses |
+| `tags` | tag filters applied when elements are cached: `load_all` + `exclude` (fnmatch globs), or only the tags the mapping uses |
 | `match` | matchers per table type: mapping values, `__any__`, filters, `areas`, relation types |
 | `columns` | column values; each type has a value type that decides the PostgreSQL type |
-| `geom` | coordinates and geometries |
+| `geom` | projection (pyproj), geometries (shapely) |
 | `writer` | rows of nodes, ways and relations; expired tiles |
-| `expire` | tile lists (adaptive zoom for long lines and large boxes) |
+| `expire` | tile lists (mercantile; adaptive zoom for long lines and large boxes) |
 | `postgis` | the SQL: tables, generalization, indexes, rotation, diff updates |
 
 Rules that decide the output:
 
-- **Coordinates.** The cache keeps coordinates as uint32 values truncated
-  from the parsed float (`1e-9 * nanodegrees` for PBF, the decimal text for
-  change files); every geometry is built from them, so a diff and an import
-  of the same data give the same coordinates.
+- **Coordinates.** The cache keeps pyosmium's integers (1e-7 degrees), the
+  same for PBF and change files; geometries are projected from them with
+  pyproj.
 - **Geometries.** Lines and polygons after removing consecutive duplicate
-  nodes; every polygon is normalized (shell clockwise from its lowest point);
-  invalid polygons are repaired with `buffer(0)`; multipolygons from member
-  ways: ring merging, closing gaps below 0.1 (SRID units), area sort,
-  containment for shells and holes.
+  nodes; every polygon is normalized; invalid polygons are repaired with
+  `buffer(0)`; multipolygons: member ways snapped (gaps below 0.1 SRID
+  units), merged into rings (`line_merge`) and combined with the even-odd
+  rule.
+- **Expired tiles.** Points: their tile and neighbours within 0.2 tiles;
+  polygons: every tile of the bounding box, lines: every tile they cross, at
+  the highest zoom where that is under 64 / 500 tiles.
 - **Skipping.** A relation with a missing member way or coordinate is
   skipped; a way whose line cannot be built is skipped entirely; relation
   member rows stop at a member that fails.
@@ -137,7 +139,7 @@ stateDiagram-v2
 
 | Check | Result |
 |---|---|
-| unit tests (mapping file, filters, matchers, columns, geometries, multipolygons, ring merging, tile lists, PBF splitting, SQL, CSV) | 196 pass |
+| unit tests (mapping file, filters, matchers, columns, geometries, multipolygons, tile lists, PBF splitting, SQL, CSV) | 177 pass |
 | Andorra 2026-11-10 imported, diffs 4964–4967 applied, compared with Andorra 2026-11-13 imported (`osm-spark-import-compare`) | all 16 tables of the default mapping identical |
 | a diff run killed while merging the cache, then run again | rolled back and redone; same tables |
 | Luxembourg import (1.3 M rows, default mapping) | completes; 78 s on the local cluster |
