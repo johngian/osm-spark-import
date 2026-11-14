@@ -76,7 +76,7 @@ flowchart TB
 ## Tags
 
 With `tags.load_all: true` every tag is kept except `tags.exclude` (keys or
-globs: `*` and `?` do not match `/`, `[...]` classes). Otherwise only tags
+globs: `*`, `?`, `[...]`, as Python's `fnmatch`, case-sensitive). Otherwise only tags
 the mapping uses are kept (mapping keys and values, column keys, filter
 keys, `tags.include`, `area`, `type`). Filtering happens before matching,
 so excluded tags never match and never appear in `hstore_tags`. Nodes and

@@ -2,80 +2,14 @@
 """Tag filters applied when elements are cached.
 
 With tags.load_all, every tag is kept except those in tags.exclude (keys or
-globs). Otherwise only the tags the mapping can use are kept.
+fnmatch globs). Otherwise only the tags the mapping can use are kept.
 """
 
 from __future__ import annotations
 
-import re
-from functools import cache
+from fnmatch import fnmatchcase
 
 from .config import Config
-
-
-@cache
-def _glob_regex(pattern: str) -> re.Pattern | None:
-    """A glob as a regex: * and ? never match '/', [...] classes with ^
-    negation, \\ escapes. None for a malformed pattern (matches nothing)."""
-    out, i, n = [], 0, len(pattern)
-    while i < n:
-        c = pattern[i]
-        if c == "*":
-            out.append("[^/]*")
-        elif c == "?":
-            out.append("[^/]")
-        elif c == "\\":
-            i += 1
-            if i >= n:
-                return None
-            out.append(re.escape(pattern[i]))
-        elif c == "[":
-            j = i + 1
-            negate = j < n and pattern[j] == "^"
-            if negate:
-                j += 1
-            parts = []
-            first = True
-            while True:
-                if j >= n:
-                    return None
-                if pattern[j] == "]" and not first:
-                    break
-                first = False
-                ch = pattern[j]
-                if ch == "\\":
-                    j += 1
-                    if j >= n:
-                        return None
-                    ch = pattern[j]
-                lo = ch
-                if j + 2 < n and pattern[j + 1] == "-" and pattern[j + 2] != "]":
-                    j += 2
-                    hi = pattern[j]
-                    if hi == "\\":
-                        j += 1
-                        if j >= n:
-                            return None
-                        hi = pattern[j]
-                    parts.append(f"{re.escape(lo)}-{re.escape(hi)}")
-                else:
-                    parts.append(re.escape(lo))
-                j += 1
-            cls = "".join(parts)
-            out.append(f"[^/{cls}]" if negate else f"[{cls}]")
-            i = j
-        else:
-            out.append(re.escape(c))
-        i += 1
-    try:
-        return re.compile("".join(out) + r"\Z", re.DOTALL)
-    except re.error:
-        return None
-
-
-def path_match(pattern: str, name: str) -> bool:
-    r = _glob_regex(pattern)
-    return bool(r and r.match(name))
 
 
 class ExcludeFilter:
@@ -87,7 +21,7 @@ class ExcludeFilter:
     def _excluded(self, k: str) -> bool:
         r = self._cache.get(k)
         if r is None:
-            r = k in self.keys or any(path_match(p, k) for p in self.patterns)
+            r = k in self.keys or any(fnmatchcase(k, p) for p in self.patterns)
             if len(self._cache) < 100_000:
                 self._cache[k] = r
         return r
