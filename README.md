@@ -6,11 +6,11 @@ replication diffs (minutely, hourly, daily). A mapping file decides which
 tables are created and what goes into them.
 
 ```mermaid
-flowchart LR
-    pbf[(PBF / .osc.gz)] -->|pyosmium in Spark tasks| cache[(cache<br/>Iceberg tables on HDFS)]
-    cache -->|Spark joins| units[work units]
-    units -->|mapping engine| outbox[(outbox<br/>Parquet batches on HDFS)]
-    outbox -->|osm-hadoop-loader<br/>WebHDFS + COPY| pg[(PostgreSQL / PostGIS)]
+flowchart TB
+    src[(PBF / .osc.gz)] -->|pyosmium| cache[(Cache<br/>Iceberg on HDFS)]
+    cache -->|Spark joins| eng[Mapping engine]
+    eng --> outbox[(Outbox<br/>Parquet on HDFS)]
+    outbox -->|loader| pg[(PostGIS)]
 ```
 
 - **pyosmium** decodes PBF chunks and change files in Spark tasks.

@@ -14,37 +14,13 @@ intermediate output, and a loader that streams batches into PostgreSQL.
 
 ```mermaid
 flowchart TB
-    subgraph sources[Sources]
-        pbf[(PBF file)]
-        repl[(replication server<br/>.osc.gz + state.txt)]
-    end
-    subgraph writer["Writer: osm-hadoop (Spark)"]
-        split[split PBF into chunks<br/>driver]
-        decode[decode chunks<br/>pyosmium, mapInArrow]
-        osc[decode change files<br/>pyosmium, driver]
-        units[assemble work units<br/>Spark joins]
-        build[build rows and tiles<br/>mapping engine, mapInArrow]
-        merge[MERGE INTO cache]
-    end
-    subgraph hdfs[HDFS]
-        cache[(cache: Iceberg<br/>nodes, ways, relations,<br/>way_nodes, rel_members)]
-        outbox[(outbox: Parquet batches)]
-        state[(writer state JSON)]
-    end
-    subgraph loader["Loader: osm-hadoop-loader"]
-        apply[apply batches<br/>COPY + SQL]
-        deploy[deploy / revert-deploy /<br/>remove-backup]
-    end
-    pg[(PostgreSQL / PostGIS<br/>import, production, backup<br/>+ osm_hadoop.loader_state)]
-    tiles[(expire files)]
-
-    pbf --> split --> decode --> cache
-    repl --> osc --> merge --> cache
-    cache --> units --> build --> outbox
-    writer --- state
-    outbox --> apply --> pg
-    apply --> tiles
-    deploy --> pg
+    pbf[(PBF)] --> w
+    repl[(Diffs)] --> w
+    w[Writer<br/>osm-hadoop, Spark] <--> h[(HDFS<br/>cache, state)]
+    w --> o[(Outbox<br/>Parquet batches)]
+    o --> l[Loader<br/>osm-hadoop-loader]
+    l --> pg[(PostGIS)]
+    l --> t[(Expire files)]
 ```
 
 The writer and the loader only share the outbox: the writer never touches
@@ -88,14 +64,13 @@ Rules that decide the output:
 ### Import
 
 ```mermaid
-flowchart LR
-    a[PBF] -->|split at blob boundaries| b[chunks on HDFS]
-    b -->|pyosmium, one task per chunk| c[(cache tables)]
-    c -->|joins| d[work units]
-    d -->|mapping engine| e[rows]
-    e --> f[(snapshot batch)]
-    f -->|loader| g[schema import:<br/>create, COPY, generalize, index]
-    g -->|osm-hadoop-loader deploy| h[production]
+flowchart TB
+    a[PBF] -->|split| b[Chunks on HDFS]
+    b -->|pyosmium| c[(Cache tables)]
+    c -->|joins| d[Work units]
+    d -->|mapping engine| e[(Snapshot batch)]
+    e -->|loader| f[Schema import]
+    f -->|deploy| g[Production]
 ```
 
 A chunk is the PBF header blob plus a run of data blobs: a valid PBF file
@@ -106,13 +81,13 @@ PBF's timestamp (pyosmium's `timestamp_to_sequence`) unless given.
 
 ```mermaid
 flowchart TB
-    a[download .osc.gz<br/>pyosmium decode] --> b[keep the last version<br/>of each element]
-    b --> c[affected elements:<br/>changed + ways of changed nodes<br/>+ relations of changed nodes/ways]
-    c --> d[old versions from the<br/>snapshot before the update:<br/>tiles to expire]
-    d --> e[MERGE INTO cache<br/>and indexes]
-    e --> f[new versions:<br/>rows and tiles to expire]
-    f --> g[(delta batch:<br/>deletes, rows, tiles)]
-    g --> h[loader: one transaction<br/>on production]
+    a[Download, decode] --> b[Last version<br/>per element]
+    b --> c[Affected elements]
+    c --> d[Old versions:<br/>tiles]
+    d --> e[MERGE into cache]
+    e --> f[New versions:<br/>rows, tiles]
+    f --> g[(Delta batch)]
+    g --> h[Loader:<br/>one transaction]
 ```
 
 Every affected element is rebuilt from the cache, so applying the final
@@ -135,13 +110,14 @@ The loader needs no mapping file: the manifest carries the table specs.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> written: writer commits _manifest.json
-    written --> import: snapshot, loader apply
-    import --> production: osm-hadoop-loader deploy
-    production --> production: delta with base = production batch
-    production --> backup: next deploy
-    backup --> production: revert-deploy
-    backup --> [*]: remove-backup
+    direction TB
+    [*] --> written: manifest
+    written --> import: apply
+    import --> production: deploy
+    production --> production: delta
+    production --> backup: deploy
+    backup --> production: revert
+    backup --> [*]: remove
 ```
 
 ## 5. Recovery
@@ -178,14 +154,14 @@ docker compose run --rm client osm-hadoop-compare public check_import
 ## 7. Scaling
 
 ```mermaid
-flowchart LR
-    s1[split + upload<br/>driver, serial] --> s2[decode<br/>one task per chunk]
-    s2 --> s3[cache writes<br/>buckets]
-    s3 --> s4[joins<br/>shuffle partitions]
-    s4 --> s5[build rows<br/>partitions]
-    s5 --> s6[loader<br/>PostgreSQL]
-    classDef serial fill:#f6d5d5,stroke:#b55
-    classDef parallel fill:#d5f0d9,stroke:#5a5
+flowchart TB
+    s1[Split, upload<br/>driver] --> s2[Decode<br/>per chunk]
+    s2 --> s3[Cache writes<br/>per bucket]
+    s3 --> s4[Joins<br/>per partition]
+    s4 --> s5[Build rows<br/>per partition]
+    s5 --> s6[Loader<br/>PostgreSQL]
+    classDef serial fill:#f6d5d5,stroke:#b55,color:#000
+    classDef parallel fill:#d5f0d9,stroke:#5a5,color:#000
     class s1,s6 serial
     class s2,s3,s4,s5 parallel
 ```

@@ -34,18 +34,22 @@ generalized_tables:
 
 ```mermaid
 flowchart TB
-    e[element with filtered tags] --> k{table type}
-    k -->|point| n[nodes]
-    k -->|linestring| w1[open ways; closed ways<br/>unless area=yes]
-    k -->|polygon| w2[closed ways unless area=no;<br/>multipolygon/boundary relations]
-    k -->|relation, relation_member| r[relations]
-    k -->|geometry| all[all of the above,<br/>via type_mappings]
-    n & w1 & w2 & r & all --> m{mapping value<br/>matches a tag?}
-    m -->|no| skip[not in table]
-    m -->|yes| f{filters, areas,<br/>relation_types pass?}
-    f -->|no| skip
-    f -->|yes| row[row]
+    e[Element,<br/>tags filtered] --> t{Fits the<br/>table type?}
+    t -->|no| x[Not in table]
+    t -->|yes| m{Mapping value<br/>matches?}
+    m -->|no| x
+    m -->|yes| f{Filters pass?}
+    f -->|no| x
+    f -->|yes| r[Row]
 ```
+
+| Table type | Elements |
+|---|---|
+| `point` | nodes |
+| `linestring` | open ways; closed ways unless `area=yes` |
+| `polygon` | closed ways unless `area=no`; multipolygon and boundary relations |
+| `relation`, `relation_member` | relations |
+| `geometry` | all of the above, through `type_mappings` |
 
 - **Values.** `key: [value, ...]`; `__any__` as value matches any value,
   `__any__: [__any__]` matches every tagged element. Values must be strings
