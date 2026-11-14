@@ -1,0 +1,112 @@
+# Local development cluster: HDFS (namenode + datanode), Spark standalone
+# (master + workers), PostGIS, the loader, and a client container for the
+# Spark jobs.
+#
+#   docker compose up -d --build
+#   docker compose run --rm client osm-hadoop import https://download.geofabrik.de/europe/andorra-latest.osm.pbf
+#   docker compose logs -f loader                          # snapshot -> schema import
+#   docker compose run --rm client osm-hadoop-loader deploy  # import -> public -> backup
+#   docker compose run --rm client osm-hadoop run           # diffs; the loader applies them to public
+#
+# UIs: HDFS http://localhost:9870, Spark http://localhost:18080 (SPARK_UI_PORT)
+name: osm-hadoop
+
+x-spark: &spark
+  image: osm-hadoop/spark:dev
+  build:
+    context: .
+    dockerfile: docker/spark/Dockerfile
+
+x-env: &env
+  OSM_MAPPING: "${OSM_MAPPING:-/mappings/default.yml}"
+  OSM_NAMESPACE: "${OSM_NAMESPACE:-andorra}"
+  OSM_BUCKETS: "4"
+  OSM_REPLICATION_URL: "${OSM_REPLICATION_URL:-https://download.geofabrik.de/europe/andorra-updates/}"
+  OSM_WORK_DIR: /data/work
+  OSM_WEBHDFS_URL: http://namenode:9870
+  OSM_EXPIRE_DIR: /data/expire
+  OSM_EXPIRE_ZOOM: "15"
+  PGHOST: postgis
+  PGUSER: osm
+  PGPASSWORD: osm
+  PGDATABASE: osm
+
+services:
+  namenode:
+    image: osm-hadoop/hadoop:dev
+    build: docker/hadoop
+    command: namenode
+    hostname: namenode
+    ports: ["9870:9870"]
+    volumes: ["hdfs-name:/hadoop/dfs/name"]
+    healthcheck:
+      test: ["CMD", "hdfs", "dfsadmin", "-safemode", "get"]
+      interval: 10s
+      retries: 12
+
+  datanode:
+    image: osm-hadoop/hadoop:dev
+    command: datanode
+    hostname: datanode
+    volumes: ["hdfs-data:/hadoop/dfs/data"]
+    depends_on:
+      namenode: { condition: service_healthy }
+
+  spark-master:
+    <<: *spark
+    command: spark-class org.apache.spark.deploy.master.Master --host spark-master --port 7077 --webui-port 8080
+    hostname: spark-master
+    ports: ["${SPARK_UI_PORT:-18080}:8080"]
+
+  spark-worker:
+    <<: *spark
+    command: spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      SPARK_WORKER_CORES: "${SPARK_WORKER_CORES:-2}"
+      SPARK_WORKER_MEMORY: "${SPARK_WORKER_MEMORY:-3g}"
+    deploy:
+      replicas: ${SPARK_WORKERS:-2}
+    depends_on: [spark-master, datanode]
+
+  postgis:
+    image: osm-hadoop/postgis:dev
+    build: docker/postgis
+    environment:
+      POSTGRES_USER: osm
+      POSTGRES_PASSWORD: osm
+      POSTGRES_DB: osm
+    ports: ["5432:5432"]
+    volumes: ["pg-data:/var/lib/postgresql/data"]
+    command: postgres -c shared_buffers=512MB -c max_wal_size=4GB
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "osm"]
+      interval: 5s
+      retries: 20
+
+  # Applies the outbox batches to PostgreSQL as they appear.
+  loader:
+    <<: *spark
+    command: osm-hadoop-loader apply --loop --interval 10
+    environment: *env
+    volumes: ["./data:/data"]
+    restart: unless-stopped
+    depends_on:
+      postgis: { condition: service_healthy }
+      datanode: { condition: service_started }
+
+  # Runs the Spark jobs: docker compose run --rm client osm-hadoop ...
+  client:
+    <<: *spark
+    profiles: [client]
+    depends_on:
+      spark-master: { condition: service_started }
+      postgis: { condition: service_healthy }
+    volumes:
+      - ./data:/data
+      - ./mappings:/mappings:ro
+    environment: *env
+
+volumes:
+  hdfs-name:
+  hdfs-data:
+  pg-data:
