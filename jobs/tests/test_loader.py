@@ -1,0 +1,64 @@
+import csv
+import io
+
+import pyarrow as pa
+from test_osm import DEFAULT_MAPPING
+
+from osm_hadoop.loader import _csv, id_expr, table_names
+from osm_hadoop.mapping import config, postgis
+from osm_hadoop.mapping.writer import Mapping
+
+
+def test_csv_for_copy():
+    b = pa.RecordBatch.from_pydict(
+        {
+            "osm_id": [1, 2],
+            "name": ["", None],  # empty string vs NULL
+            "note": ['a "quoted",\nvalue', "x"],
+            "ok": [True, None],
+            "area": pa.array([38549.098, None], pa.float32()),
+            "way": [b"\x01\x02", b"\xff"],
+        }
+    )
+    text = _csv(b, {"way"}).decode()
+    # PostgreSQL CSV: unquoted empty is NULL, "" is the empty string
+    rows = list(csv.reader(io.StringIO(text)))
+    assert rows[0] == ["1", "", 'a "quoted",\nvalue', "true", "38549.098", "0102"]
+    assert ',,"x",,,"ff"' in text
+
+
+def test_id_expr():
+    assert id_expr("n", False) == "id" and id_expr("w", False) == "id" and id_expr("r", False) == "-id"
+    assert id_expr("w", True) == "-id" and id_expr("r", True) == "(-100000000000000000 - id)"
+
+
+def test_default_mapping_ddl():
+    m = Mapping(config.load(DEFAULT_MAPPING)).manifest()
+    point = m["tables"]["planet_osm_point"]
+    sql = postgis.create_table_sql("import", "planet_osm_point", point)
+    assert sql.startswith(
+        'CREATE TABLE IF NOT EXISTS "import"."planet_osm_point" (\nid BIGSERIAL,\n"osm_id" BIGINT,'
+    )
+    assert '"tags" HSTORE' in sql and '"way"' not in sql and sql.endswith('PRIMARY KEY ("osm_id", "id")\n);')
+    assert postgis.add_geometry_column_sql("import", "planet_osm_point", point, 3857) == (
+        "SELECT AddGeometryColumn('import', 'planet_osm_point', 'way', '3857', 'POINT', 2);"
+    )
+    poly = m["tables"]["planet_osm_polygon"]
+    assert "'GEOMETRY', 2)" in postgis.add_geometry_column_sql("import", "planet_osm_polygon", poly, 3857)
+    admin = postgis.create_table_sql("import", "admin", m["tables"]["admin"])
+    assert 'PRIMARY KEY ("relation_id", "osm_id", "id")' in admin and '"maritime" BOOL' in admin
+    gen = postgis.Generalized(m["tables"], m["generalized"])
+    assert gen.order()[0] == "planet_osm_polygon_landuse_gen_z13"
+    assert gen.root("planet_osm_polygon_landuse_gen_z6") == "planet_osm_polygon_landuse"
+    z13 = gen.create_sql("import", "planet_osm_polygon_landuse_gen_z13")
+    assert (
+        'ST_MakeValid(ST_SimplifyPreserveTopology("way", 19.109257), \'method=structure\')::Geometry as "way"'
+        in z13
+    )
+    assert z13.endswith(
+        'FROM "import"."planet_osm_polygon_landuse" WHERE area>power(76.4370282852,2) AND ST_IsValid(way))'
+    )
+    assert postgis.index_sqls("import", "planet_osm_point", point["columns"], False) == [
+        'CREATE INDEX "planet_osm_point_geom" ON "import"."planet_osm_point" USING GIST ("way")'
+    ]
+    assert len(table_names(m)) == 8 + 8

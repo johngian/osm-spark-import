@@ -22,6 +22,7 @@ dev = ["black==24.10.0", "isort==5.13.2", "ruff==0.8.4"]
 
 [project.scripts]
 osm-hadoop = "osm_hadoop.cli:main"
+osm-hadoop-loader = "osm_hadoop.loader:main"
 
 [build-system]
 requires = ["setuptools>=68"]
