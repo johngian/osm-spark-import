@@ -22,12 +22,14 @@ from osm_spark_import.mapping.expire import TileList
 from osm_spark_import.mapping.match import Match, is_closed, matchers
 from osm_spark_import.mapping.tags import node_filter, relation_filter, way_filter
 
-REL_ID_OFFSET = -100000000000000000  # element.RelIDOffset
+REL_ID_OFFSET = -100000000000000000  # relation IDs with use_single_id_space
 MEMBER_TYPES = {"n": 0, "w": 1, "r": 2}
 
 
 @dataclass
 class Row:
+    """A row of a table."""
+
     table: str
     id: int  # the element's ID as written (for generalized tables)
     gen: bool  # whether diffs update the generalized tables for it
@@ -60,16 +62,7 @@ class Mapping:
         pre-select targets on raw tags), or None for "any tagged element"
         (a mapping with __any__)."""
         types, kinds = self.KIND_TABLES[kind]
-        keys: set[str] = set()
-        for t in self.conf.tables.values():
-            if t.type not in types:
-                continue
-            kvs = list(t.mapping)
-            for sub in t.mappings.values():
-                kvs += sub
-            for k in kinds:
-                kvs += t.type_mappings[k]
-            keys.update(k for k, _, _ in kvs)
+        keys = {k for t in self.conf.tables.values() if t.type in types for k, _, _ in t.key_values(kinds)}
         if "__any__" in keys:
             return None
         return sorted(keys)
@@ -96,19 +89,17 @@ class Mapping:
         }
 
     def way_id(self, id_: int) -> int:
+        """The ID written for a way."""
         return -id_ if self.conf.single_id_space else id_
 
     def rel_id(self, id_: int) -> int:
+        """The ID written for a relation."""
         return REL_ID_OFFSET - id_ if self.conf.single_id_space else -id_
 
 
-def tag_dict(raw) -> dict[str, str]:
-    if not raw:
-        return {}
-    return dict(raw)
-
-
 class Builder:
+    """Builds the rows (and expired tiles) of batches of work units."""
+
     def __init__(self, mapping: Mapping, expire_zoom: int = 0, deleter_expire: bool = False):
         self.mp = mapping
         self.srid = mapping.srid
@@ -118,7 +109,8 @@ class Builder:
 
     # --- cache -----------------------------------------------------------------
 
-    def fill_cache(self, units: list[dict]):
+    def fill_cache(self, units: list[dict]) -> dict[str, list[int]]:
+        """Load the units' elements, tags filtered, and project coordinates; returns target IDs per kind."""
         mp = self.mp
         coords: dict[int, tuple[int, int]] = {}  # 1e-7 degrees
         nodes: dict[int, dict] = {}  # tags (non-empty after filtering)
@@ -128,16 +120,16 @@ class Builder:
 
         def put_node(id_, tags, lon, lat):
             coords[id_] = (lon, lat)
-            t = mp.node_filter.filter(tag_dict(tags))
+            t = mp.node_filter.filter(dict(tags or ()))
             if t:
                 nodes[id_] = t
 
         def put_way(id_, tags, refs):
-            ways[id_] = (mp.way_filter.filter(tag_dict(tags)), list(refs or []))
+            ways[id_] = (mp.way_filter.filter(dict(tags or ())), list(refs or []))
 
         def put_rel(id_, tags, members):
-            t = mp.relation_filter.filter(tag_dict(tags))
-            if t:  # PutRelations skips relations without tags
+            t = mp.relation_filter.filter(dict(tags or ()))
+            if t:  # relations without tags are not cached
                 rels[id_] = (t, list(members or []))
 
         self.changed: dict[str, set[int]] = {"n": set(), "w": set(), "r": set()}
@@ -172,7 +164,7 @@ class Builder:
         return targets
 
     def fill(self, refs: list[int]) -> list[tuple[float, float]] | None:
-        """FillWay + NodesToSrid; None if a coordinate is missing."""
+        """Projected coordinates of refs; None if one is missing."""
         out = []
         for r in refs:
             c = self.coords.get(r)
@@ -188,11 +180,13 @@ class Builder:
     # --- rows ------------------------------------------------------------------
 
     def insert(self, matches: list[Match], tags: dict, elem_id: int, geom, gen: bool) -> None:
+        """Add a row per match."""
         for m in matches:
             ctx = Ctx(tags, elem_id, geom, m.key, m.value, self.srid)
             self.rows.append(Row(m.table, elem_id, gen, [c.value(ctx) for c in self.mp.columns[m.table]]))
 
     def process(self, units: list[dict]) -> None:
+        """Build the rows of the targets, or with deleter_expire only expire their tiles."""
         targets = self.fill_cache(units)
         if self.deleter_expire:
             if self.tiles is not None:
@@ -206,6 +200,7 @@ class Builder:
             self.build_node(id_)
 
     def build_node(self, id_: int) -> None:
+        """Point rows of a node."""
         tags = self.nodes.get(id_)
         if tags is None:
             return
@@ -217,6 +212,7 @@ class Builder:
             self.tiles.expire(*self.wgs[id_])
 
     def build_way(self, id_: int) -> None:
+        """Linestring and polygon rows of a way."""
         w = self.ways.get(id_)
         if w is None:
             return
@@ -254,12 +250,12 @@ class Builder:
             self.tiles.expire_nodes(self.wgs_coords(refs), inserted_polygon)
 
     def build_relation(self, id_: int) -> None:
+        """Relation member, relation and multipolygon rows of a relation."""
         r = self.rels.get(id_)
         if r is None:
             return
         tags, members = r
-        # FillMembers, then FillWay for every way member: a missing way or
-        # coordinate skips the relation
+        # a missing member way or coordinate skips the relation
         member_ways: dict[int, tuple[dict, list[int], list]] = {}  # tags, refs, coordinates
         for mem in members:
             if mem["type"] != "w":
@@ -301,7 +297,7 @@ class Builder:
                     self.tiles.expire_nodes(self.wgs_coords(member_ways[mem["ref"]][1]), True)
 
     def build_relation_members(self, id_, rel_id, tags, members, member_ways) -> bool:
-        """handleRelationMembers: True if succeeded (rows may be partial on failure)."""
+        """Rows of relation_member tables, one per member; False on failure (rows may be partial)."""
         matches = self.mp.m.relation_member.match_relation(tags)
         if not matches:
             return False
@@ -375,7 +371,7 @@ class Builder:
                 continue
             if id_ not in self.changed["r"] and not self.relation_complete(members):
                 continue
-            # FillMembers stops at the first missing way
+            # stop at the first missing way
             for mem in members:
                 if mem["type"] != "w":
                     continue
@@ -400,6 +396,7 @@ class Builder:
                 tl.expire(*self.wgs[id_])
 
     def relation_complete(self, members) -> bool:
+        """Whether every member way and its coordinates are there."""
         for mem in members:
             if mem["type"] != "w":
                 continue
@@ -410,6 +407,7 @@ class Builder:
 
 
 def ewkb(geom, srid: int) -> bytes | None:
+    """EWKB of a geometry, with its SRID."""
     if geom is None:
         return None
     return shapely.to_wkb(shapely.set_srid(geom, srid), include_srid=True)

@@ -52,31 +52,29 @@ DEFAULT_RANKS = {
     "motorway": 9,
 }
 
-INT32 = (-(2**31), 2**31 - 1)
-INT64 = (-(2**63), 2**63 - 1)
+INT32 = np.iinfo(np.int32)
 INT_RE = re.compile(r"[+-]?[0-9]+\Z")
 
 
 def parse_int(s: str | None, bits: int) -> int | None:
-    """strconv.ParseInt(s, 10, bits): None on error (empty, syntax, range)."""
+    """A base 10 integer that fits a signed int of bits (8-64) bits; None if empty, invalid or out of range."""
     if not s or not INT_RE.match(s):
         return None
     v = int(s)
-    lo, hi = INT32 if bits == 32 else INT64
-    return v if lo <= v <= hi else None
+    info = np.iinfo(f"int{bits}")
+    return v if info.min <= v <= info.max else None
 
 
 def parse_int_ignoring_error(s: str | None, bits: int) -> int:
-    """`v, _ := strconv.ParseInt(s, 10, bits)`: 0 on syntax errors, the
-    clamped value on range errors."""
+    """Like parse_int, but 0 if empty or invalid and clamped if out of range."""
     if not s or not INT_RE.match(s):
         return 0
-    lo, hi = INT32 if bits == 32 else INT64
-    return min(max(int(s), lo), hi)
+    info = np.iinfo(f"int{bits}")
+    return min(max(int(s), info.min), info.max)
 
 
 def wrap64(v: int) -> int:
-    """64 bit integer overflow."""
+    """Wrap v around as a signed 64 bit integer."""
     return (v + 2**63) % 2**64 - 2**63
 
 
@@ -94,6 +92,8 @@ class Ctx:
 
 @dataclass
 class MemberCtx:
+    """What a member value function sees: one member of a relation."""
+
     member_id: int
     member_type: int  # 0 node, 1 way, 2 relation
     role: str
@@ -102,7 +102,11 @@ class MemberCtx:
 
 
 def truthy(v: str) -> bool:
+    """Tag value as a boolean: false for "", "0", "false" and "no"."""
     return not (v == "" or v == "0" or v == "false" or v == "no")
+
+
+# Value functions: (tag value of the column's key, Ctx) -> column value.
 
 
 def bool_value(val, c):
@@ -146,6 +150,7 @@ def direction_value(val, c):
 
 
 def area_value(val, c):
+    """Area in SRID units (None if empty)."""
     if c.geom is None:
         return None
     a = float(shapely.area(c.geom))
@@ -165,10 +170,12 @@ def webmerc_area_value(val, c):
 
 
 def hstore_escape(s: str) -> str:
+    """Escape a key or value for an hstore literal."""
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def enum_arg(column: Column, key: str) -> dict[str, int]:
+    """A list argument as value -> position (from 1)."""
     values = column.args.get(key)
     if values is None:
         raise MappingError(f"missing '{key}' in args for {column.type}")
@@ -183,6 +190,7 @@ def enum_arg(column: Column, key: str) -> dict[str, int]:
 
 
 def make_hstore(column: Column):
+    """hstore_tags: all tags, or those in args.include."""
     include = None if "include" not in column.args else enum_arg(column, "include")
 
     def hstore(val, c):
@@ -196,6 +204,7 @@ def make_hstore(column: Column):
 
 
 def way_zorder_default(val, c):
+    """wayzorder without args.ranks: layer * 10 + road rank, -10 in tunnels, +10 on bridges."""
     z = wrap64(parse_int_ignoring_error(c.tags.get("layer"), 64) * 10)
     rank = DEFAULT_RANKS.get(c.match_value, 0)
     if rank == 0 and "railway" in c.tags:
@@ -205,10 +214,11 @@ def way_zorder_default(val, c):
         z = wrap64(z - 10)
     if c.tags.get("bridge") in ("true", "yes", "1"):
         z = wrap64(z + 10)
-    return z if INT32[0] <= z <= INT32[1] else None
+    return z if INT32.min <= z <= INT32.max else None
 
 
 def make_wayzorder(column: Column):
+    """wayzorder: layer and the rank of the matched value in args.ranks."""
     if "ranks" not in column.args:
         return way_zorder_default
     ranks = enum_arg(column, "ranks")
@@ -227,12 +237,13 @@ def make_wayzorder(column: Column):
             z -= offset
         if c.tags.get("bridge") in ("true", "yes", "1"):
             z += offset
-        return z if INT32[0] <= z <= INT32[1] else None
+        return z if INT32.min <= z <= INT32.max else None
 
     return wayzorder
 
 
 def make_zorder(column: Column):
+    """zorder: rank in args.ranks (first is highest) of args.key's value or the matched value."""
     ranks_list = column.args.get("ranks")
     if ranks_list is None:
         raise MappingError("missing ranks in args for zorder")
@@ -256,6 +267,7 @@ def make_zorder(column: Column):
 
 
 def make_enumerate(column: Column):
+    """enumerate: position in args.values of the key's value or the matched value."""
     values = enum_arg(column, "values")
 
     def enumerate_(val, c):
@@ -267,6 +279,7 @@ def make_enumerate(column: Column):
 
 
 def make_suffix_replace(column: Column):
+    """string_suffixreplace: replace the word suffixes in args.suffixes."""
     changes = column.args.get("suffixes")
     if changes is None:
         raise MappingError("missing suffixes in args for string_suffixreplace")
@@ -283,6 +296,7 @@ def make_suffix_replace(column: Column):
 
 
 def make_categorize_int(column: Column):
+    """categorize_int: args.values[value], trying the key then args keys, else args.default."""
     values = column.args.get("values")
     if values is None:
         raise MappingError("missing 'values' in 'args' for categorize_int")
@@ -307,6 +321,9 @@ def make_categorize_int(column: Column):
         return default
 
     return categorize
+
+
+# Member value functions: MemberCtx -> column value.
 
 
 def member_id_value(m: MemberCtx):
@@ -356,6 +373,8 @@ UNSUPPORTED = {"geojson_intersects", "geojson_intersects_feature"}
 
 @dataclass
 class ColumnSpec:
+    """A column with its value function."""
+
     name: str
     type: str
     value_type: str
@@ -377,13 +396,13 @@ class ColumnSpec:
         return self.value_type in ("geometry", "validated_geometry")
 
     def value(self, c: Ctx) -> Any:
-        """valueBuilder.Value."""
+        """The column's value for an element."""
         if self.func is None:
             return None
         return self.func(c.tags.get(self.key, ""), c)
 
     def member_value(self, rel: Ctx, m: MemberCtx) -> Any:
-        """valueBuilder.MemberValue."""
+        """The column's value for a relation member row."""
         if self.func is not None:
             if self.from_member:
                 if m.element is None:
@@ -396,6 +415,7 @@ class ColumnSpec:
 
 
 def column_spec(column: Column) -> ColumnSpec:
+    """The ColumnSpec of a mapping column; raises MappingError for unknown types."""
     if column.type in UNSUPPORTED:
         raise MappingError(f"column type {column.type} is not supported")
     t = TYPES.get(column.type)

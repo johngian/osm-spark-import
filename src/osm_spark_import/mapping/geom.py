@@ -23,14 +23,10 @@ TO_WGS = Transformer.from_crs(3857, 4326, always_xy=True)
 
 
 class GeomError(Exception):
-    pass
+    """A geometry that cannot be built."""
 
 
 # --- coordinates ----------------------------------------------------------------
-
-
-def degrees(e7: int) -> float:
-    return e7 / 10_000_000
 
 
 def project(lons: np.ndarray, lats: np.ndarray, srid: int) -> tuple[np.ndarray, np.ndarray]:
@@ -41,6 +37,7 @@ def project(lons: np.ndarray, lats: np.ndarray, srid: int) -> tuple[np.ndarray, 
 
 
 def to_wgs84(geom, srid: int):
+    """A geometry in srid as WGS84 degrees."""
     if srid == 4326:
         return geom
     return shapely.transform(geom, lambda c: np.column_stack(TO_WGS.transform(c[:, 0], c[:, 1])))
@@ -50,10 +47,12 @@ def to_wgs84(geom, srid: int):
 
 
 def point(x: float, y: float):
+    """A point."""
     return shapely.Point(x, y)
 
 
 def linestring(pts):
+    """A line without repeated points; GeomError if it has no length."""
     if len(pts) < 2:
         raise GeomError("need at least two nodes")
     g = shapely.remove_repeated_points(shapely.LineString(pts), TOLERANCE)
@@ -63,6 +62,7 @@ def linestring(pts):
 
 
 def polygon(pts):
+    """A normalized polygon from a closed ring; GeomError if it is not one."""
     if len(pts) < 4 or pts[0] != pts[-1]:
         raise GeomError("not a closed ring")
     try:

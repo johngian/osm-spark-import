@@ -20,11 +20,14 @@ import sys
 
 import psycopg
 
+from osm_spark_import.mapping.postgis import q
+
 TOLERANCE = 1e-6
 SKIP = {"spatial_ref_sys", "loader_state"}
 
 
 def tables(cur, schema: str) -> set[str]:
+    """Base tables of a schema, without SKIP."""
     cur.execute(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = %s AND table_type = 'BASE TABLE'",
         (schema,),
@@ -49,19 +52,16 @@ def columns(cur, schema: str, table: str) -> list[tuple[str, str]]:
     return out
 
 
-def qi(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
-
-
 def compare_table(cur, a: str, b: str, t: str, samples: int) -> tuple[str, bool]:
+    """Compare table t in schemas a and b: (status line(s), equal within tolerance)."""
     cols = columns(cur, a, t)
     if cols != columns(cur, b, t):
         return "DIFFERENT columns", False
-    exact = ", ".join(f"{qi(c)}::text" for c, _ in cols)
+    exact = ", ".join(f"{q(c)}::text" for c, _ in cols)
     diffs = []
     for x, y in ((a, b), (b, a)):
         cur.execute(
-            f"SELECT count(*) FROM (SELECT {exact} FROM {qi(x)}.{qi(t)} EXCEPT ALL SELECT {exact} FROM {qi(y)}.{qi(t)}) d"
+            f"SELECT count(*) FROM (SELECT {exact} FROM {q(x)}.{q(t)} EXCEPT ALL SELECT {exact} FROM {q(y)}.{q(t)}) d"
         )
         diffs.append(cur.fetchone()[0])
     if diffs == [0, 0]:
@@ -74,30 +74,30 @@ def compare_table(cur, a: str, b: str, t: str, samples: int) -> tuple[str, bool]
     for name, x, y in (("pa", a, b), ("pb", b, a)):
         cur.execute(f"DROP TABLE IF EXISTS {name}")
         cur.execute(
-            f"CREATE TEMP TABLE {name} AS SELECT {exact} FROM {qi(x)}.{qi(t)} EXCEPT ALL SELECT {exact} FROM {qi(y)}.{qi(t)}"
+            f"CREATE TEMP TABLE {name} AS SELECT {exact} FROM {q(x)}.{q(t)} EXCEPT ALL SELECT {exact} FROM {q(y)}.{q(t)}"
         )
     # one hashable key: all non-geometry, non-float columns (NULLs marked)
     pkey = (
-        "md5(concat_ws(chr(1), " + ", ".join(f"coalesce({qi(c)}, chr(2))" for c in keys) + "))"
+        "md5(concat_ws(chr(1), " + ", ".join(f"coalesce({q(c)}, chr(2))" for c in keys) + "))"
         if keys
         else "''"
     )
-    order = ", ".join(f"ST_AsEWKB(ST_Normalize({qi(g)}::geometry))" for g in geoms) or "1"
+    order = ", ".join(f"ST_AsEWKB(ST_Normalize({q(g)}::geometry))" for g in geoms) or "1"
     sel = lambda s: (  # noqa: E731
         f"SELECT *, {pkey} AS pkey, row_number() OVER (PARTITION BY {pkey} ORDER BY {order}) AS rn FROM {s}"
     )
     conds = []
     for g in geoms:
-        ga, gb = f"a.{qi(g)}::geometry", f"b.{qi(g)}::geometry"
+        ga, gb = f"a.{q(g)}::geometry", f"b.{q(g)}::geometry"
         conds.append(
-            f"((a.{qi(g)} IS NULL AND b.{qi(g)} IS NULL) OR (ST_IsEmpty({ga}) AND ST_IsEmpty({gb})) OR "
+            f"((a.{q(g)} IS NULL AND b.{q(g)} IS NULL) OR (ST_IsEmpty({ga}) AND ST_IsEmpty({gb})) OR "
             f"(GeometryType({ga}) = GeometryType({gb}) AND ST_NPoints({ga}) = ST_NPoints({gb}) "
             f"AND ST_HausdorffDistance(ST_Normalize({ga}), ST_Normalize({gb})) <= {TOLERANCE}))"
         )
     for f in floats:
-        fa, fb = f"a.{qi(f)}::float8", f"b.{qi(f)}::float8"
+        fa, fb = f"a.{q(f)}::float8", f"b.{q(f)}::float8"
         conds.append(
-            f"((a.{qi(f)} IS NULL AND b.{qi(f)} IS NULL) OR abs({fa} - {fb}) <= {TOLERANCE} * greatest(abs({fa}), abs({fb}), 1))"
+            f"((a.{q(f)} IS NULL AND b.{q(f)} IS NULL) OR abs({fa} - {fb}) <= {TOLERANCE} * greatest(abs({fa}), abs({fb}), 1))"
         )
     join = "a.pkey = b.pkey AND a.rn = b.rn"
     ok_cond = " AND ".join(conds) or "true"
@@ -109,9 +109,9 @@ def compare_table(cur, a: str, b: str, t: str, samples: int) -> tuple[str, bool]
     if bad == 0:
         return f"ok within tolerance ({diffs[0]} rows differ in the last digits)", True
     lines = [f"DIFFERENT: {diffs[0]} rows only in {a}, {diffs[1]} only in {b}; {bad} beyond tolerance"]
-    first = qi(keys[0]) if keys else "rn"
+    first = q(keys[0]) if keys else "rn"
     shown = (
-        ", ".join(f"ST_AsText(a.{qi(g)}::geometry), ST_AsText(b.{qi(g)}::geometry)" for g in geoms)
+        ", ".join(f"ST_AsText(a.{q(g)}::geometry), ST_AsText(b.{q(g)}::geometry)" for g in geoms)
         or "null, null"
     )
     cur.execute(
@@ -125,6 +125,7 @@ def compare_table(cur, a: str, b: str, t: str, samples: int) -> tuple[str, bool]
 
 
 def compare(a: str, b: str, samples: int = 5) -> bool:
+    """Print a comparison of every table of schemas a and b; True if they match."""
     ok = True
     with psycopg.connect() as conn, conn.cursor() as cur:
         ta, tb = tables(cur, a), tables(cur, b)
@@ -135,7 +136,7 @@ def compare(a: str, b: str, samples: int = 5) -> bool:
             print(f"{t:40} only in {a if t in ta else b}")
             ok = False
         for t in sorted(ta & tb):
-            cur.execute(f"SELECT count(*) FROM {qi(a)}.{qi(t)}")
+            cur.execute(f"SELECT count(*) FROM {q(a)}.{q(t)}")
             n = cur.fetchone()[0]
             status, good = compare_table(cur, a, b, t, samples)
             print(f"{t:40} {n:8} rows  {status}")
@@ -144,6 +145,7 @@ def compare(a: str, b: str, samples: int = 5) -> bool:
 
 
 def main() -> None:
+    """Entry point of osm-spark-import-compare; exits 1 if the schemas differ."""
     p = argparse.ArgumentParser(prog="osm-spark-import-compare", description=__doc__.split("\n\n")[0])
     p.add_argument("a")
     p.add_argument("b")

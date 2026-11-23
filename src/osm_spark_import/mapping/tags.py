@@ -7,34 +7,33 @@ fnmatch globs). Otherwise only the tags the mapping can use are kept.
 
 from __future__ import annotations
 
-from fnmatch import fnmatchcase
+import re
+from fnmatch import translate
 
-from osm_spark_import.mapping.config import Config
+from osm_spark_import.mapping.config import TYPE_MAPPING_KINDS, Config
 
 
 class ExcludeFilter:
-    def __init__(self, exclude: list[str]):
-        self.keys = {k for k in exclude if not any(c in k for c in "?*[")}
-        self.patterns = [k for k in exclude if any(c in k for c in "?*[")]
-        self.memo: dict[str, bool] = {}
+    """Keeps every tag except those whose key matches an exclude entry (key or glob)."""
 
-    def excluded(self, k: str) -> bool:
-        r = self.memo.get(k)
-        if r is None:
-            r = k in self.keys or any(fnmatchcase(k, p) for p in self.patterns)
-            if len(self.memo) < 100_000:
-                self.memo[k] = r
-        return r
+    def __init__(self, exclude: list[str]):
+        self.pattern = re.compile("|".join(translate(k) for k in exclude)) if exclude else None
 
     def filter(self, tags: dict[str, str]) -> dict[str, str]:
-        return {k: v for k, v in tags.items() if not self.excluded(k)}
+        """The tags that are not excluded."""
+        if self.pattern is None:
+            return dict(tags)
+        return {k: v for k, v in tags.items() if not self.pattern.match(k)}
 
 
 class TagFilter:
+    """Keeps the tags a mapping value matches, and the tags of the extra keys."""
+
     def __init__(self, mappings: dict[str, set[str]], extra: set[str]):
         self.mappings, self.extra = mappings, extra
 
     def filter(self, tags: dict[str, str]) -> dict[str, str]:
+        """The tags that are kept."""
         out = {}
         for k, v in tags.items():
             values = self.mappings.get(k)
@@ -47,16 +46,11 @@ class TagFilter:
 
 def add_mapping_tags(conf: Config, table_type: str, into: dict[str, set[str]]) -> None:
     """The mapping values of a table type, as key -> values."""
-    kind = {"point": "points", "linestring": "linestrings", "polygon": "polygons"}.get(table_type)
+    kind = TYPE_MAPPING_KINDS.get(table_type)
     for t in conf.tables.values():
         if t.type != "geometry" and t.type != table_type:
             continue
-        kvs = list(t.mapping)
-        for sub in t.mappings.values():
-            kvs += sub
-        if kind:
-            kvs += t.type_mappings[kind]
-        for k, v, _ in kvs:
+        for k, v, _ in t.key_values([kind] if kind else []):
             into.setdefault(k, set()).add(v)
 
 
@@ -78,7 +72,8 @@ def add_extra_tags(conf: Config, table_type: str, tags: set[str]) -> None:
     tags.add("area")
 
 
-def node_filter(conf: Config):
+def node_filter(conf: Config) -> ExcludeFilter | TagFilter:
+    """The tag filter for nodes."""
     if conf.load_all:
         return ExcludeFilter(conf.exclude)
     m: dict[str, set[str]] = {}
@@ -89,7 +84,8 @@ def node_filter(conf: Config):
     return TagFilter(m, extra)
 
 
-def way_filter(conf: Config):
+def way_filter(conf: Config) -> ExcludeFilter | TagFilter:
+    """The tag filter for ways."""
     if conf.load_all:
         return ExcludeFilter(conf.exclude)
     m: dict[str, set[str]] = {}
@@ -101,7 +97,8 @@ def way_filter(conf: Config):
     return TagFilter(m, extra)
 
 
-def relation_filter(conf: Config):
+def relation_filter(conf: Config) -> ExcludeFilter | TagFilter:
+    """The tag filter for relations."""
     if conf.load_all:
         return ExcludeFilter(conf.exclude)
     # the type tag of common relations is kept

@@ -13,13 +13,15 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from osm_spark_import.mapping.config import Config, KeyValues
+from osm_spark_import.mapping.config import TYPE_MAPPING_KINDS, Config, KeyValues
 
 Filter = Callable[[dict, str, bool], bool]  # (tags, matched key, closed) -> keep
 
 
 @dataclass(frozen=True)
 class Match:
+    """The tag that matched a table (and sub-mapping)."""
+
     key: str
     value: str
     table: str
@@ -27,12 +29,13 @@ class Match:
 
 
 def add_mapping(into: dict, kvs: KeyValues, table: str, sub: str) -> None:
+    """Index kvs as key -> value -> [(table, sub, order)]."""
     for k, v, order in kvs:
         into.setdefault(k, {}).setdefault(v, []).append((table, sub, order))
 
 
 def value_filter(keep_if: bool, key: str, values: list[str]) -> Filter:
-    """makeFiltersFunction: require (keep_if=True) / reject (False)."""
+    """Filter on key having one of values: require (keep_if=True) or reject (False)."""
     if "__any__" in values:
         return lambda tags, k, closed: keep_if if key in tags else not keep_if
     vals = set(values)
@@ -40,11 +43,14 @@ def value_filter(keep_if: bool, key: str, values: list[str]) -> Filter:
 
 
 def regexp_filter(keep_if: bool, key: str, pattern: str) -> Filter:
+    """Filter on the value of key matching pattern: require (keep_if=True) or reject (False)."""
     r = re.compile(pattern)  # unanchored search
     return lambda tags, k, closed: keep_if if key in tags and r.search(tags[key]) else not keep_if
 
 
 class Matcher:
+    """Matches the tags of one kind of geometry against the tables of a type."""
+
     def __init__(
         self,
         conf: Config,
@@ -55,7 +61,7 @@ class Matcher:
     ):
         self.match_areas = match_areas
         self.mappings: dict[str, dict[str, list]] = {}
-        kind = {"point": "points", "linestring": "linestrings", "polygon": "polygons"}.get(table_type)
+        kind = TYPE_MAPPING_KINDS.get(table_type)
         for name, t in conf.tables.items():
             if t.type != "geometry" and t.type != table_type:
                 continue
@@ -73,6 +79,7 @@ class Matcher:
             self.add_relation_filters(conf)
 
     def add_filters(self, conf: Config) -> None:
+        """The tables' filters: exclude_tags, require, reject and their regexp variants."""
         for name, t in conf.tables.items():
             f = t.filters
             if f is None:
@@ -90,6 +97,7 @@ class Matcher:
                 fl.append(regexp_filter(False, key, pattern))
 
     def add_typed_filters(self, conf: Config, table_type: str) -> None:
+        """area_tags / linear_tags filters for closed ways and relations."""
         area_tags = set(conf.area_tags) if conf.area_tags is not None else None
         linear_tags = set(conf.linear_tags) if conf.linear_tags is not None else None
         for name, t in conf.tables.items():
@@ -118,6 +126,7 @@ class Matcher:
                 self.filters.setdefault(name, []).append(poly)
 
     def add_relation_filters(self, conf: Config) -> None:
+        """relation_types filters (polygon tables default to multipolygon, boundary, land_area)."""
         for name, t in conf.tables.items():
             if t.relation_types is not None:
                 types = set(t.relation_types)
@@ -131,6 +140,7 @@ class Matcher:
                 )
 
     def match(self, tags: dict[str, str], closed: bool, relation: bool) -> list[Match]:
+        """The matches of tags, one per table and sub-mapping, filters applied."""
         best: dict[tuple[str, str], tuple[int, str, str]] = {}
 
         def add(k, v, tables):
@@ -164,6 +174,7 @@ class Matcher:
         return self.match(tags, False, False)
 
     def match_way(self, tags: dict, refs: list[int]) -> list[Match]:
+        """Matches of a way; polygon matchers only match closed ways."""
         closed = is_closed(refs)
         if self.match_areas:  # as polygon
             if closed:
@@ -188,6 +199,8 @@ def is_closed(refs: list[int]) -> bool:
 
 @dataclass
 class Matchers:
+    """One Matcher per table type."""
+
     point: Matcher
     linestring: Matcher
     polygon: Matcher
@@ -196,17 +209,19 @@ class Matchers:
 
 
 def matchers(conf: Config) -> Matchers:
+    """The matchers of a mapping."""
     return Matchers(
         point=Matcher(conf, "point", "point", False, False),
         linestring=Matcher(conf, "linestring", "linestring", False, False),
         polygon=Matcher(conf, "polygon", "polygon", True, True),
-        # relationMatcher adds the typed filters of polygon and relation tables
+        # with the typed filters of polygon and relation tables
         relation=relation_matcher(conf),
         relation_member=Matcher(conf, "relation_member", "relation_member", True, True),
     )
 
 
 def relation_matcher(conf: Config) -> Matcher:
+    """Matcher for relation tables, with the typed filters of polygon and relation tables."""
     m = Matcher(conf, "relation", "polygon", True, True)
     m.add_typed_filters(conf, "relation")
     return m

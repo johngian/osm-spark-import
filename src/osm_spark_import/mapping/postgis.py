@@ -12,16 +12,23 @@ Table names have no prefix.
 
 from __future__ import annotations
 
+import graphlib
+
+from psycopg import sql
+
 
 def q(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
+    """A quoted SQL identifier."""
+    return sql.Identifier(name).as_string()
 
 
 def is_geometry(col: dict) -> bool:
+    """Whether a manifest column is a geometry."""
     return col["pg"] == "GEOMETRY"
 
 
 def id_column(cols: list[dict]) -> str:
+    """Name of the column holding the element ID."""
     for c in cols:
         if c["type"] == "id":
             return c["name"]
@@ -29,7 +36,10 @@ def id_column(cols: list[dict]) -> str:
 
 
 def create_table_sql(schema: str, name: str, spec: dict) -> str:
-    """TableSpec.CreateTableSQL."""
+    """CREATE TABLE for a table spec, without its geometry column (see add_geometry_column_sql).
+
+    Tables without an "id" column get a BIGSERIAL id, part of the primary key.
+    """
     cols_spec = spec["columns"]
     found_id = any(c["name"] == "id" for c in cols_spec)
     pk = [c["name"] for c in cols_spec if c["type"] == "id"]
@@ -47,7 +57,7 @@ def create_table_sql(schema: str, name: str, spec: dict) -> str:
 
 
 def add_geometry_column_sql(schema: str, name: str, spec: dict, srid: int) -> str | None:
-    """addGeometryColumn: the first geometry column only."""
+    """AddGeometryColumn for the first geometry column (None if there is none)."""
     col = next((c["name"] for c in spec["columns"] if is_geometry(c)), None)
     if col is None:
         return None
@@ -55,15 +65,17 @@ def add_geometry_column_sql(schema: str, name: str, spec: dict, srid: int) -> st
     gtype = gtype.upper()
     if gtype == "POLYGON":
         gtype = "GEOMETRY"  # for multipolygon support
-    return f"SELECT AddGeometryColumn('{schema}', '{name}', '{col}', '{srid}', '{gtype}', 2);"
+    args = ", ".join(sql.Literal(str(v)).as_string() for v in (schema, name, col, srid, gtype))
+    return f"SELECT AddGeometryColumn({args}, 2);"
 
 
 def copy_columns(spec: dict) -> list[str]:
+    """Columns of a table spec, in COPY order."""
     return [c["name"] for c in spec["columns"]]
 
 
 class Generalized:
-    """GeneralizedTableSpec with its sources resolved (prepareGeneralizedTableSources)."""
+    """Generalized tables of a manifest, with their sources checked."""
 
     def __init__(self, tables: dict, generalized: dict):
         self.tables, self.gen = tables, generalized
@@ -79,28 +91,24 @@ class Generalized:
         return src
 
     def order(self) -> list[str]:
-        """Tables with non-generalized sources first (sortedGeneralizedTables)."""
-        done, out = set(), []
-        names = sorted(self.gen)
-        while len(out) < len(names):
-            progress = False
-            for n in names:
-                if n in done:
-                    continue
-                src = self.gen[n]["source"]
-                if src not in self.gen or src in done:
-                    done.add(n)
-                    out.append(n)
-                    progress = True
-            if not progress:
-                raise ValueError("cycle in generalized tables")
+        """Generalized tables, each after its source; sorted by name within a level."""
+        ts = graphlib.TopologicalSorter(
+            {n: [g["source"]] if g["source"] in self.gen else [] for n, g in self.gen.items()}
+        )
+        ts.prepare()  # raises graphlib.CycleError (a ValueError) on a cycle
+        out: list[str] = []
+        while ts.is_active():
+            ready = sorted(ts.get_ready())
+            out += ready
+            ts.done(*ready)
         return out
 
     def of_table(self, table: str) -> list[str]:
-        """Source.Generalizations: every generalized table derived from table."""
+        """Every generalized table derived from table, directly or not."""
         return [n for n in self.order() if self.root(n) == table]
 
     def select_sql(self, name: str) -> str:
+        """SELECT list of a generalized table: its root's columns, geometries simplified."""
         g = self.gen[name]
         tol = f"{g['tolerance']:f}"  # 6 decimals
         cols = []
@@ -117,7 +125,7 @@ class Generalized:
         return ",\n".join(cols)
 
     def create_sql(self, schema: str, name: str) -> str:
-        """generalizeTable."""
+        """CREATE TABLE AS for a generalized table, from its source."""
         g = self.gen[name]
         where = f" WHERE {g['sql_filter']}" if g["sql_filter"] else ""
         return (
@@ -126,7 +134,7 @@ class Generalized:
         )
 
     def insert_sql(self, schema: str, name: str) -> str:
-        """GeneralizedTableSpec.InsertSQL ($1 as %s)."""
+        """INSERT of one element's rows (its ID as %s) from the source into a generalized table."""
         g = self.gen[name]
         idc = id_column(self.tables[self.root(name)]["columns"])
         where = f" WHERE {q(idc)} = %s"
@@ -134,13 +142,9 @@ class Generalized:
             where += f" AND ({g['sql_filter']})"
         return f"INSERT INTO {q(schema)}.{q(name)} (SELECT {self.select_sql(name)} FROM {q(schema)}.{q(g['source'])}{where})"
 
-    def delete_sql(self, schema: str, name: str) -> str:
-        idc = id_column(self.tables[self.root(name)]["columns"])
-        return f"DELETE FROM {q(schema)}.{q(name)} WHERE {q(idc)} = ANY(%s)"
-
 
 def index_sqls(schema: str, name: str, cols: list[dict], generalized: bool) -> list[str]:
-    """createIndex."""
+    """CREATE INDEX statements: GiST on geometries, B-tree on the ID column where it is not the key."""
     found_id = any(c["name"] == "id" for c in cols)
     out = []
     for c in cols:
@@ -164,8 +168,3 @@ KINDS = {
     "relation_member": ("r",),
     "geometry": ("n", "w", "r"),
 }
-
-
-def delete_sql(schema: str, name: str, spec: dict) -> str:
-    """TableSpec.DeleteSQL for many IDs."""
-    return f"DELETE FROM {q(schema)}.{q(name)} WHERE {q(id_column(spec['columns']))} = ANY(%s)"

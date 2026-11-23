@@ -8,6 +8,8 @@ are all kept.
 
 from __future__ import annotations
 
+import itertools
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,13 +17,15 @@ import yaml
 
 
 class MappingError(ValueError):
-    pass
+    """An invalid mapping file."""
 
 
 # KeyValues: [(key, value, order)], order counted over all values of the map
 KeyValues = list[tuple[str, str, int]]
 
 TABLE_TYPES = ("point", "linestring", "polygon", "geometry", "relation", "relation_member")
+# table type -> its type_mappings key (geometry tables)
+TYPE_MAPPING_KINDS = {"point": "points", "linestring": "linestrings", "polygon": "polygons"}
 
 
 class PairsMap(dict):
@@ -33,10 +37,11 @@ class PairsMap(dict):
 
 
 class YamlLoader(yaml.SafeLoader):
-    pass
+    """SafeLoader building PairsMap mappings."""
 
 
 def construct_map(loader: YamlLoader, node: yaml.MappingNode) -> PairsMap:
+    """Construct a YAML mapping as a PairsMap."""
     loader.flatten_mapping(node)
     pairs = [
         (loader.construct_object(k, deep=True), loader.construct_object(v, deep=True)) for k, v in node.value
@@ -50,6 +55,7 @@ YamlLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, const
 
 
 def parse_key_values(raw: Any, where: str) -> KeyValues:
+    """A mapping {key: [values]} as KeyValues, duplicate keys included."""
     if raw is None:
         return []
     if not isinstance(raw, dict):
@@ -60,7 +66,7 @@ def parse_key_values(raw: Any, where: str) -> KeyValues:
         if not isinstance(k, str):
             raise MappingError(f"{where}: mapping key '{k}' not a string")
         if not isinstance(values, list):
-            raise MappingError(f"{where}: mapping key '{k}' not a string")
+            raise MappingError(f"{where}: values of mapping key '{k}' not a list")
         for v in values:
             if not isinstance(v, str):
                 raise MappingError(f"{where}: mapping value '{v}' for mapping key '{k}' not a string")
@@ -71,6 +77,8 @@ def parse_key_values(raw: Any, where: str) -> KeyValues:
 
 @dataclass
 class Column:
+    """A table column as written in the mapping file."""
+
     name: str
     type: str
     key: str = ""
@@ -81,6 +89,8 @@ class Column:
 
 @dataclass
 class Filters:
+    """The filters of a table."""
+
     require: KeyValues = field(default_factory=list)
     reject: KeyValues = field(default_factory=list)
     require_regexp: dict[str, str] = field(default_factory=dict)
@@ -90,6 +100,8 @@ class Filters:
 
 @dataclass
 class Table:
+    """A table of the mapping file."""
+
     name: str
     type: str
     mapping: KeyValues
@@ -99,9 +111,17 @@ class Table:
     filters: Filters | None
     relation_types: list[str] | None
 
+    def key_values(self, kinds: Iterable[str] = ()) -> KeyValues:
+        """mapping, every sub-mapping, and the type_mappings of kinds (points, ...)."""
+        return list(
+            itertools.chain(self.mapping, *self.mappings.values(), *(self.type_mappings[k] for k in kinds))
+        )
+
 
 @dataclass
 class GeneralizedTable:
+    """A simplified copy of a table (or of another generalized table)."""
+
     name: str
     source: str
     tolerance: float
@@ -110,6 +130,8 @@ class GeneralizedTable:
 
 @dataclass
 class Config:
+    """A parsed mapping file."""
+
     tables: dict[str, Table]
     generalized_tables: dict[str, GeneralizedTable]
     load_all: bool
@@ -121,6 +143,7 @@ class Config:
 
 
 def parse_column(raw: dict, where: str) -> Column:
+    """A column of a table."""
     if not isinstance(raw, dict):
         raise MappingError(f"{where}: column is not a mapping")
     return Column(
@@ -134,6 +157,7 @@ def parse_column(raw: dict, where: str) -> Column:
 
 
 def parse_filters(raw: Any, where: str) -> Filters | None:
+    """The filters of a table (None if it has none)."""
     if raw is None:
         return None
     return Filters(
@@ -146,6 +170,7 @@ def parse_filters(raw: Any, where: str) -> Filters | None:
 
 
 def parse(raw: dict) -> Config:
+    """A parsed mapping file; raises MappingError if it is invalid."""
     if not isinstance(raw, dict):
         raise MappingError("mapping is not a YAML/JSON object")
     tables = {}
@@ -169,7 +194,7 @@ def parse(raw: dict) -> Config:
             },
             type_mappings={
                 kind: parse_key_values(tm.get(kind), f"{where} type_mappings {kind}")
-                for kind in ("points", "linestrings", "polygons")
+                for kind in TYPE_MAPPING_KINDS.values()
             },
             columns=[parse_column(c, f"{where} column {i}") for i, c in enumerate(cols or [])],
             filters=parse_filters(t.get("filters"), where),
@@ -200,9 +225,11 @@ def parse(raw: dict) -> Config:
 
 
 def load(path: str) -> Config:
+    """Parse a mapping file."""
     with open(path) as f:
-        return parse(yaml.load(f, Loader=YamlLoader))
+        return from_text(f.read())
 
 
 def from_text(text: str) -> Config:
+    """Parse mapping file text (YAML or JSON)."""
     return parse(yaml.load(text, Loader=YamlLoader))

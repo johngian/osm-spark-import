@@ -24,8 +24,10 @@ MANIFEST = "_manifest.json"
 
 
 def batch_name(batch: int) -> str:
+    """Directory name of a batch: zero padded, so names sort by number."""
     return f"{batch:012d}"
 
 
 def batch_dir(root: str, batch: int) -> str:
+    """Directory of a batch under an outbox root."""
     return f"{root}/{batch_name(batch)}"

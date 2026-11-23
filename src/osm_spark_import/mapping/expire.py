@@ -21,20 +21,25 @@ MAX_LAT = 85.0511287798066
 
 
 def in_range(lon: float, lat: float) -> bool:
+    """Whether a point is within the Web Mercator range."""
     return -180 <= lon <= 180 and -MAX_LAT <= lat <= MAX_LAT
 
 
 def box_count(w: float, s: float, e: float, n: float, zoom: int) -> int:
+    """Number of tiles covering a bounding box at zoom."""
     nw, se = mercantile.tile(w, n, zoom), mercantile.tile(e, s, zoom)
     return (se.x - nw.x + 1) * (se.y - nw.y + 1)
 
 
 class TileList:
+    """A set of expired tiles."""
+
     def __init__(self, max_zoom: int):
         self.max_zoom = max_zoom
         self.tiles: set[tuple[int, int, int]] = set()
 
     def expire(self, lon: float, lat: float) -> None:
+        """Expire the tiles around a point at the maximum zoom."""
         if not in_range(lon, lat):
             return
         z = self.max_zoom
@@ -60,6 +65,7 @@ class TileList:
                 return
 
     def expire_line(self, nodes, bbox, zoom: int) -> None:
+        """Expire the tiles at zoom that the line crosses."""
         if len(nodes) == 1:
             self.expire(*nodes[0])
             return
@@ -69,4 +75,5 @@ class TileList:
         self.tiles.update((t.x, t.y, t.z) for t, h in zip(candidates, hit, strict=True) if h)
 
     def as_strings(self) -> list[str]:
+        """The tiles as z/x/y strings."""
         return [f"{z}/{x}/{y}" for x, y, z in self.tiles]
