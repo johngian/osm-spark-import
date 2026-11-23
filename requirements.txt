@@ -1,0 +1,3 @@
+# Spark comes with the env (SparkSubmitOperator use_virtualenv_spark), matching
+# the Iceberg runtime JAR iceberg-spark-runtime-3.5_2.12.
+pyspark==3.5.3

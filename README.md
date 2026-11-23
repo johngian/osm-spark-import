@@ -24,6 +24,7 @@ flowchart TB
   order, each in one transaction.
 
 Design: [docs/design.md](docs/design.md). Mapping format: [docs/mapping.md](docs/mapping.md).
+Deployment on a Spark/YARN cluster (conda env artifact, Airflow): [docs/deploy.md](docs/deploy.md).
 
 ## Local cluster
 
@@ -96,7 +97,7 @@ fails until `unlock`.
 
 ## Tests
 
-Unit tests run in the image build: mapping file, filters,
+Unit tests run in the image build and in CI: mapping file, filters,
 matchers, column values, geometries and multipolygons, tile lists, chunking,
 settings, SQL, CSV for COPY, loader. `tests/test_spark_pipeline.py` runs the
 Spark side in local mode with an Iceberg catalog in a temporary directory

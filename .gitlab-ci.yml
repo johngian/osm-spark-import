@@ -1,0 +1,33 @@
+# Tests, and the conda env artifact of the Spark jobs (workflow_utils):
+#   publish_conda_env   builds the env and publishes it to the package registry
+#                       (manual; automatic on tags)
+#   trigger_release     drops .dev, tags, bumps to the next .dev (manual, main only;
+#                       RELEASE_VERSION_BUMP=major|minor|patch, default minor)
+# Needs the masked CI variable CI_PROJECT_PASSWORD (project access token,
+# Maintainer, api + write_repository). See docs/deploy.md.
+include:
+  - project: repos/data-engineering/workflow_utils
+    ref: v0.36.0
+    file: /gitlab_ci_templates/pipelines/conda_artifact_repo.yml
+
+default:
+  tags: [memory-optimized]
+
+test:
+  # the artifact's Python (conda-environment.yaml) and Java, for the Spark tests too
+  image: $CONDA_BASE_IMAGE
+  stage: test
+  variables:
+    ICEBERG_JAR_URL: https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.6.1/iceberg-spark-runtime-3.5_2.12-1.6.1.jar
+    OSM_TEST_ICEBERG_JAR: /tmp/iceberg-spark-runtime.jar
+  before_script:
+    - !reference [.conda_setup_script]
+  script:
+    - conda env create -q -n osm -f conda-environment.yaml
+    - conda activate osm
+    - pip install -q -c constraints.txt -r requirements.txt '.[test,dev]'
+    - curl -fsSL -o "$OSM_TEST_ICEBERG_JAR" "$ICEBERG_JAR_URL"
+    - ruff check src tests bin
+    - black --check src tests bin
+    - isort --check-only src tests bin
+    - python -m pytest -q tests

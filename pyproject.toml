@@ -1,10 +1,11 @@
 [project]
 name = "osm-spark-import"
-version = "0.2.0"
+version = "0.3.0.dev"
 description = "OSM import pipeline with Spark: pyosmium, Iceberg/Parquet, PostgreSQL"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
-# pyspark is installed by the image, in the version the cluster runs
+# pyspark comes from requirements.txt (conda env, docker image), in the version
+# that matches the Iceberg runtime JAR
 dependencies = [
   "osmium==4.3.2",
   "shapely==2.1.2",
@@ -28,6 +29,10 @@ osm-spark-import = "osm_spark_import.cli:main"
 osm-spark-import-loader = "osm_spark_import.loader:main"
 osm-spark-import-compare = "osm_spark_import.compare:main"
 
+[tool.setuptools]
+# the PySpark application of SparkSubmitOperator.for_virtualenv: bin/osm_spark_import_job.py
+script-files = ["bin/osm_spark_import_job.py"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
@@ -37,7 +42,7 @@ where = ["src"]
 
 [tool.black]
 line-length = 110
-target-version = ["py311"]
+target-version = ["py310"]
 
 [tool.isort]
 profile = "black"
@@ -46,7 +51,7 @@ known_first_party = ["osm_spark_import"]
 
 [tool.ruff]
 line-length = 110
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 # pycodestyle, pyflakes, bugbear, pyupgrade, absolute imports; import order is isort's, line length black's

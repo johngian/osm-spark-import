@@ -1,0 +1,6 @@
+# conda env of the job artifact (workflow_utils conda-dist): Python here,
+# the package and its locked dependencies through pip (pyproject.toml,
+# requirements.txt, constraints.txt).
+dependencies:
+  - python=3.10
+  - pip
