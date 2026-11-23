@@ -2,20 +2,31 @@
 
 from __future__ import annotations
 
+import dataclasses
+import logging
 import os
+import re
 from dataclasses import dataclass
-from urllib.parse import urlparse
+
+import fsspec
 
 from osm_spark_import.mapping import config
 from osm_spark_import.mapping.writer import Mapping
 
+NAME_RE = re.compile(r"[a-z][a-z0-9_]*\Z")
+TRUE = {"1", "true", "yes", "on"}
 
-def env(name: str, default: str) -> str:
-    return os.environ.get(name) or default
+
+def setup_logging() -> None:
+    """Timestamped INFO messages from this package; WARNING and above from the rest."""
+    logging.basicConfig(format="[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
+    logging.getLogger("osm_spark_import").setLevel(logging.INFO)
 
 
 @dataclass
 class Settings:
+    """Every field is read from OSM_<FIELD NAME> (e.g. OSM_STORAGE_ROOT)."""
+
     mapping: str = ""
     namespace: str = "osm"
     srid: int = 3857
@@ -25,14 +36,16 @@ class Settings:
     storage_root: str = "hdfs://namenode:8020/osm"
     buckets: int = 16
     partitions: int = 0  # 0: Spark's default parallelism
-    chunk_mb: int = 32  # PBF chunk size: decoding runs one task per chunk
+    chunk_mb: int = 32  # default PBF chunk size of `chunk`: decoding runs one task per chunk
     replication_url: str = "https://planet.openstreetmap.org/replication/minute/"
     max_diffs: int = 24
-    work_dir: str = "/data/work"
+    big_unit_nodes: int = 100_000  # work units with more coordinates are built apart
+    snapshot_retention_hours: int = 24  # `maintain` expires older cache snapshots
 
-    # loader (PostgreSQL through libpq's PG* variables)
-    webhdfs_url: str = "http://namenode:9870"
+    # loader (PostgreSQL through libpq's PG* variables) and `chunk`
+    webhdfs_url: str = ""  # read the outbox over WebHDFS; empty: fsspec on OSM_STORAGE_ROOT
     webhdfs_user: str = ""
+    webhdfs_kerberos: bool = False
     schema: str = "public"
     schema_import: str = "import"
     schema_backup: str = "backup"
@@ -40,53 +53,50 @@ class Settings:
     expire_dir: str = ""
     expire_zoom: int = 15
 
+    def __post_init__(self) -> None:
+        self.storage_root = self.storage_root.rstrip("/")
+        self.webhdfs_url = self.webhdfs_url.rstrip("/")
+        for name in ("namespace", "catalog"):
+            if not NAME_RE.match(getattr(self, name)):
+                raise SystemExit(
+                    f"OSM_{name.upper()}: lower case letters, digits and _, starting with a letter"
+                )
+
     @classmethod
     def from_env(cls) -> Settings:
-        return cls(
-            mapping=env("OSM_MAPPING", ""),
-            namespace=env("OSM_NAMESPACE", "osm"),
-            srid=int(env("OSM_SRID", "3857")),
-            catalog=env("OSM_CATALOG", "osm"),
-            storage_root=env("OSM_STORAGE_ROOT", cls.storage_root).rstrip("/"),
-            buckets=int(env("OSM_BUCKETS", "16")),
-            partitions=int(env("OSM_PARTITIONS", "0")),
-            chunk_mb=int(env("OSM_CHUNK_MB", "32")),
-            replication_url=env("OSM_REPLICATION_URL", cls.replication_url),
-            max_diffs=int(env("OSM_MAX_DIFFS", "24")),
-            work_dir=env("OSM_WORK_DIR", "/data/work"),
-            webhdfs_url=env("OSM_WEBHDFS_URL", cls.webhdfs_url).rstrip("/"),
-            webhdfs_user=env("OSM_WEBHDFS_USER", ""),
-            schema=env("OSM_SCHEMA", "public"),
-            schema_import=env("OSM_SCHEMA_IMPORT", "import"),
-            schema_backup=env("OSM_SCHEMA_BACKUP", "backup"),
-            loader_workers=int(env("OSM_LOADER_WORKERS", "4")),
-            expire_dir=env("OSM_EXPIRE_DIR", ""),
-            expire_zoom=int(env("OSM_EXPIRE_ZOOM", "15")),
-        )
+        """Settings from OSM_* variables; unset or empty ones keep their default."""
+        values = {}
+        for f in dataclasses.fields(cls):
+            raw = os.environ.get(f"OSM_{f.name.upper()}")
+            if raw:
+                kind = type(f.default)
+                values[f.name] = raw.lower() in TRUE if kind is bool else kind(raw)
+        return cls(**values)
 
-    def check_mapping(self) -> None:
-        if not self.mapping or not os.path.isfile(self.mapping):
-            raise SystemExit(f"OSM_MAPPING: mapping file {self.mapping!r} not found")
+    def load_mapping(self) -> tuple[Mapping, str]:
+        """The parsed mapping and the mapping file text. OSM_MAPPING is a path or a
+        URL (e.g. hdfs://, for jobs whose driver runs in a cluster container)."""
         if self.srid not in (3857, 4326):
             raise SystemExit("OSM_SRID: 3857 or 4326")
-
-    def load_mapping(self):
-        """(mapping.writer.Mapping, mapping file text)."""
-
-        self.check_mapping()
-        with open(self.mapping) as f:
-            text = f.read()
+        if not self.mapping:
+            raise SystemExit("OSM_MAPPING: no mapping file")
+        try:
+            with fsspec.open(self.mapping, "r") as f:
+                text = f.read()
+        except FileNotFoundError as e:
+            raise SystemExit(f"OSM_MAPPING: mapping file {self.mapping!r} not found") from e
         return Mapping(config.from_text(text), self.srid), text
 
     def table(self, name: str) -> str:
+        """Fully qualified name of a cache table."""
         return f"{self.catalog}.{self.namespace}.{name}"
 
     @property
-    def outbox(self) -> str:
-        """Outbox directory as a URI (writer)."""
-        return f"{self.storage_root}/outbox/{self.namespace}"
+    def staging(self) -> str:
+        """Staging directory of the namespace's runs."""
+        return f"{self.storage_root}/staging/{self.namespace}"
 
     @property
-    def outbox_path(self) -> str:
-        """Outbox directory as a path (loader, through WebHDFS)."""
-        return urlparse(self.storage_root).path.rstrip("/") + f"/outbox/{self.namespace}"
+    def outbox(self) -> str:
+        """Outbox directory as a URI."""
+        return f"{self.storage_root}/outbox/{self.namespace}"

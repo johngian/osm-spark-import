@@ -1,7 +1,8 @@
 """osm-spark-import-loader: applies outbox batches to PostgreSQL.
 
-A standalone process (no Spark, no JVM): it reads the outbox over WebHDFS
-(fsspec + pyarrow) and writes with COPY (psycopg). The database connection
+A standalone process (no Spark, no JVM): it reads the outbox with fsspec
+(WebHDFS, or the filesystem of OSM_STORAGE_ROOT; see files.py) and pyarrow,
+and writes with COPY (psycopg). The database connection
 comes from libpq's PG* environment variables. The SQL comes from
 mapping.postgis.
 
@@ -16,7 +17,11 @@ mapping.postgis.
     osm-spark-import-loader deploy         import -> production -> backup
     osm-spark-import-loader revert-deploy  backup -> production -> import
     osm-spark-import-loader remove-backup  drop the backup tables
+    osm-spark-import-loader clean          delete outbox batches no schema needs
     osm-spark-import-loader status
+
+Batches below the oldest batch in a schema are deleted after each change
+(the loader needs write access to the outbox).
 
 State: osm_spark_import.loader_state, one row per namespace: which batch is in the
 import, production and backup schemas, written in the same transaction as
@@ -27,68 +32,71 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
+import contextlib
 import datetime as dt
 import io
 import json
+import logging
 import os
+import posixpath
 import time
-from urllib.parse import urlparse
+from collections.abc import Iterator
 
-import fsspec
 import psycopg
 import pyarrow as pa
 import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
-from osm_spark_import import outbox
+from osm_spark_import import files, outbox
 from osm_spark_import.mapping import postgis as P
 from osm_spark_import.mapping.writer import REL_ID_OFFSET
-from osm_spark_import.settings import Settings
+from osm_spark_import.settings import Settings, setup_logging
 
 COPY_BATCH = 50_000
 STATE = "osm_spark_import.loader_state"
 
-
-def log(msg: str) -> None:
-    print(f"[{dt.datetime.now():%H:%M:%S}] {msg}", flush=True)
+log = logging.getLogger(__name__)
 
 
 class Outbox:
+    """Access to the namespace's outbox."""
+
     def __init__(self, s: Settings):
-        u = urlparse(s.webhdfs_url)
-        kw = {"host": u.hostname, "port": u.port or 9870}
-        if s.webhdfs_user:
-            kw["user"] = s.webhdfs_user
-        self.fs = fsspec.filesystem("webhdfs", **kw)
-        self.root = s.outbox_path
+        self.fs, self.root = files.url_fs(s, s.outbox)
+
+    def delete(self, batch: int) -> None:
+        """Delete a batch."""
+        self.fs.rm(outbox.batch_dir(self.root, batch), recursive=True)
 
     def batches(self) -> list[int]:
+        """Numbers of the batches in the outbox, complete or not, ascending."""
         if not self.fs.exists(self.root):
             return []
-        out = []
-        for p in self.fs.ls(self.root, detail=False):
-            name = p.rstrip("/").rsplit("/", 1)[-1]
-            if name.isdigit():
-                out.append(int(name))
-        return sorted(out)
+        names = (posixpath.basename(p.rstrip("/")) for p in self.fs.ls(self.root, detail=False))
+        return sorted(int(n) for n in names if n.isdigit())
 
     def manifest(self, batch: int) -> dict | None:
+        """A batch's manifest, or None while it is incomplete."""
         path = f"{outbox.batch_dir(self.root, batch)}/{outbox.MANIFEST}"
         if not self.fs.exists(path):
             return None  # not complete yet
         return json.loads(self.fs.cat(path))
 
     def files(self, batch: int, part: str) -> list[str]:
+        """Parquet data files under a part (e.g. tables/roads) of a batch."""
         d = f"{outbox.batch_dir(self.root, batch)}/{part}"
         if not self.fs.exists(d):
             return []
         return sorted(
             p
             for p in self.fs.find(d)
-            if p.endswith(".parquet") and not p.rsplit("/", 1)[-1].startswith((".", "_"))
+            if p.endswith(".parquet") and not posixpath.basename(p).startswith((".", "_"))
         )
 
-    def read(self, path: str, columns: list[str]):
+    def read(self, path: str, columns: list[str]) -> Iterator[pa.RecordBatch]:
+        """Record batches of COPY_BATCH rows of a Parquet file."""
         with self.fs.open(path, "rb") as f:
             yield from pq.ParquetFile(f).iter_batches(batch_size=COPY_BATCH, columns=columns)
 
@@ -110,6 +118,7 @@ def to_csv(batch: pa.RecordBatch, geometry: set[str]) -> bytes:
 def copy_file(
     cur, ob: Outbox, path: str, schema: str, table: str, columns: list[str], geometry: set[str]
 ) -> int:
+    """COPY a Parquet file into a table; returns the number of rows."""
     stmt = (
         f"COPY {P.q(schema)}.{P.q(table)} ({', '.join(P.q(c) for c in columns)}) FROM STDIN WITH (FORMAT csv)"
     )
@@ -122,7 +131,7 @@ def copy_file(
 
 
 def table_names(m: dict) -> list[str]:
-    """tableNames(): mapping tables and generalized tables."""
+    """Names of a manifest's tables, generalized tables included."""
     return list(m["tables"]) + list(m.get("generalized") or {})
 
 
@@ -135,11 +144,17 @@ def id_expr(kind: str, single_id_space: bool) -> str:
     return "id"
 
 
+def obsolete_batches(batches: list[int], st: dict) -> list[int]:
+    """Batches older than every batch a schema holds (none while no schema holds one)."""
+    held = [st[k] for k in ("import_batch", "production_batch", "backup_batch") if st[k] is not None]
+    return [b for b in batches if held and b < min(held)]
+
+
 def write_expire_file(expire_dir: str, tiles: list[str]) -> str | None:
     """DIR/YYYYMMDD/HHMMSS.mmm.tiles, written via .tiles~ and renamed."""
     if not tiles:
         return None
-    now = dt.datetime.now(dt.UTC)
+    now = dt.datetime.now(dt.timezone.utc)
     day = os.path.join(expire_dir, now.strftime("%Y%m%d"))
     os.makedirs(day, exist_ok=True)
     path = os.path.join(day, now.strftime("%H%M%S.") + f"{now.microsecond // 1000:03d}.tiles")
@@ -150,10 +165,21 @@ def write_expire_file(expire_dir: str, tiles: list[str]) -> str | None:
 
 
 class Loader:
+    """Applies batches and rotates schemas; keeps its state in STATE."""
+
     def __init__(self, s: Settings):
         self.s = s
         self.ob = Outbox(s)
+        self.conn: psycopg.Connection | None = None
+        self.connect()
+
+    def connect(self) -> None:
+        """(Re)connect to PostgreSQL and create the state table if needed."""
+        if self.conn is not None:
+            with contextlib.suppress(psycopg.Error):
+                self.conn.close()
         self.conn = psycopg.connect(autocommit=True)
+        s = self.s
         with self.conn.cursor() as cur:
             cur.execute("CREATE SCHEMA IF NOT EXISTS osm_spark_import")
             cur.execute(
@@ -176,51 +202,30 @@ class Loader:
             if not cur.fetchone()[0]:
                 raise SystemExit(f"another loader is applying batches for namespace {self.s.namespace}")
 
-    def work_lock(self):
+    @contextlib.contextmanager
+    def work_lock(self) -> Iterator[None]:
         """Serializes applying a batch with deploy/revert/remove-backup."""
-        loader = self
+        key = f"osm-spark-import-work:{self.s.namespace}"
+        self.conn.execute("SELECT pg_advisory_lock(hashtext(%s))", (key,))
+        try:
+            yield
+        finally:
+            self.conn.execute("SELECT pg_advisory_unlock(hashtext(%s))", (key,))
 
-        class Lock:
-            def __enter__(self):
-                with loader.conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT pg_advisory_lock(hashtext('osm-spark-import-work:' || %s))",
-                        (loader.s.namespace,),
-                    )
-
-            def __exit__(self, *exc):
-                with loader.conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT pg_advisory_unlock(hashtext('osm-spark-import-work:' || %s))",
-                        (loader.s.namespace,),
-                    )
-
-        return Lock()
-
-    def state(self, cur=None) -> dict:
-        cur = cur or self.conn.cursor()
-        cur.execute(
-            f"""SELECT import_batch, import_manifest, production_batch, production_manifest,
-                       backup_batch, backup_manifest, sequence, osm_time FROM {STATE} WHERE namespace = %s""",
-            (self.s.namespace,),
-        )
-        keys = (
-            "import_batch",
-            "import_manifest",
-            "production_batch",
-            "production_manifest",
-            "backup_batch",
-            "backup_manifest",
-            "sequence",
-            "osm_time",
-        )
-        return dict(zip(keys, cur.fetchone(), strict=False))
+    def state(self) -> dict:
+        """The namespace's row of STATE (in the current transaction, if any)."""
+        with self.conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                f"""SELECT import_batch, import_manifest, production_batch, production_manifest,
+                           backup_batch, backup_manifest, sequence, osm_time FROM {STATE} WHERE namespace = %s""",
+                (self.s.namespace,),
+            )
+            return cur.fetchone()
 
     def save_state(self, cur, **values) -> None:
+        """Update columns of the namespace's row of STATE."""
         cols = ", ".join(f"{k} = %s" for k in values)
-        params = [
-            json.dumps(v) if k.endswith("_manifest") and v is not None else v for k, v in values.items()
-        ]
+        params = [Jsonb(v) if k.endswith("_manifest") and v is not None else v for k, v in values.items()]
         cur.execute(
             f"UPDATE {STATE} SET {cols}, updated = now() WHERE namespace = %s", (*params, self.s.namespace)
         )
@@ -228,10 +233,12 @@ class Loader:
     # --- applying batches --------------------------------------------------------
 
     def step(self) -> bool:
+        """Apply what is ready, under the work lock; True if anything was applied."""
         with self.work_lock():
             return self.apply_next()
 
     def apply_next(self) -> bool:
+        """Load the newest complete snapshot, then the deltas based on production."""
         st = self.state()
         seen = max(st["import_batch"] or 0, st["production_batch"] or 0)
         manifests = []
@@ -260,14 +267,15 @@ class Loader:
         return applied
 
     def load_snapshot(self, m: dict) -> None:
+        """Load a snapshot batch into the import schema (tables, COPY, generalized, indexes)."""
         s, b = self.s, m["batch"]
         t0 = time.time()
         imp = s.schema_import
-        log(f"batch {b}: snapshot (sequence {m['sequence']}) into schema {imp}")
+        log.info(f"batch {b}: snapshot (sequence {m['sequence']}) into schema {imp}")
         gen = P.Generalized(m["tables"], m.get("generalized") or {})
         with self.conn.cursor() as cur:
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {P.q(imp)}")
-            for name, spec in m["tables"].items():  # Init
+            for name, spec in m["tables"].items():  # empty tables
                 cur.execute(f"DROP TABLE IF EXISTS {P.q(imp)}.{P.q(name)}")
                 cur.execute(P.create_table_sql(imp, name, spec))
                 add = P.add_geometry_column_sql(imp, name, spec, m["srid"])
@@ -296,18 +304,19 @@ class Loader:
                     raise SystemExit(
                         f"{name}: loaded {counts.get(name, 0)} rows, the batch has {m['rows'][name]}"
                     )
-            # Generalize: level by level, sources first
+            # generalized tables, sources first
             for name in gen.order():
                 run([f"DROP TABLE IF EXISTS {P.q(imp)}.{P.q(name)}", gen.create_sql(imp, name)])
-            # Finish: indexes
+            # indexes
             jobs = [P.index_sqls(imp, n, spec["columns"], False) for n, spec in m["tables"].items()]
             jobs += [P.index_sqls(imp, n, m["tables"][gen.root(n)]["columns"], True) for n in gen.order()]
             list(pool.map(run, jobs))
         with self.conn.transaction(), self.conn.cursor() as cur:
             self.save_state(cur, import_batch=b, import_manifest=m)
-        log(f"batch {b}: {sum(counts.values())} rows in {time.time() - t0:.1f}s; deploy to make it live")
+        log.info(f"batch {b}: {sum(counts.values())} rows in {time.time() - t0:.1f}s; deploy to make it live")
 
     def apply_delta(self, m: dict, st: dict) -> None:
+        """Apply a delta batch to the production schema in one transaction."""
         s, b = self.s, m["batch"]
         prod = s.schema
         current = st["production_manifest"] or {}
@@ -325,7 +334,7 @@ class Loader:
             for batch in self.ob.read(path, ["tile"]):
                 tiles += batch.column(0).to_pylist()
         if tiles and s.expire_dir:  # before the commit: tiles are never lost
-            log(f"expired tiles: {write_expire_file(s.expire_dir, sorted(tiles))}")
+            log.info(f"expired tiles: {write_expire_file(s.expire_dir, sorted(tiles))}")
 
         inserted = 0
         with self.conn.transaction(), self.conn.cursor() as cur:
@@ -357,37 +366,39 @@ class Loader:
                                 if g:
                                     for gn in gens:
                                         gen_ids.setdefault(gn, []).append(id_)
-            for gn in gen.order():  # GeneralizeUpdates, one insert per recorded ID
+            for gn in gen.order():  # one insert per recorded ID, sources first
                 ids = gen_ids.get(gn)
                 if ids:
                     cur.executemany(gen.insert_sql(prod, gn), [(i,) for i in ids])
             self.save_state(
                 cur, production_batch=b, production_manifest=m, sequence=m["sequence"], osm_time=m["osm_time"]
             )
-        log(
+        log.info(
             f"batch {b}: sequence {m['sequence']}, deleted {deleted}, inserted {inserted} rows in {time.time() - t0:.1f}s"
         )
 
     # --- deploy / revert-deploy / remove-backup ------------------------------------
 
     def rotate_tables(self, source: str, dest: str, backup: str, names: list[str]) -> None:
+        """Move tables source -> dest -> backup in one transaction and update the state."""
         with self.conn.transaction(), self.conn.cursor() as cur:
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {P.q(dest)}")
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {P.q(backup)}")
             for name in names:
                 cur.execute("SELECT to_regclass(%s) IS NOT NULL", (f"{P.q(source)}.{P.q(name)}",))
                 if not cur.fetchone()[0]:
-                    log(f"skipping rotate of {name}, table does not exist in {source}")
+                    log.info(f"skipping rotate of {name}, table does not exist in {source}")
                     continue
                 cur.execute("SELECT to_regclass(%s) IS NOT NULL", (f"{P.q(dest)}.{P.q(name)}",))
                 if cur.fetchone()[0]:
                     cur.execute(f"DROP TABLE IF EXISTS {P.q(backup)}.{P.q(name)}")
                     cur.execute(f"ALTER TABLE {P.q(dest)}.{P.q(name)} SET SCHEMA {P.q(backup)}")
                 cur.execute(f"ALTER TABLE {P.q(source)}.{P.q(name)} SET SCHEMA {P.q(dest)}")
-                log(f"rotated {name}: {source} -> {dest} -> {backup}")
-            self.after_rotate(cur, self.state(cur), source, dest)
+                log.info(f"rotated {name}: {source} -> {dest} -> {backup}")
+            self.after_rotate(cur, self.state(), source, dest)
 
-    def after_rotate(self, cur, st, source, dest):
+    def after_rotate(self, cur, st: dict, source: str, dest: str) -> None:
+        """Shift the batches recorded per schema after a deploy or revert."""
         s = self.s
         if source == s.schema_import:  # deploy
             self.save_state(
@@ -415,6 +426,7 @@ class Loader:
             )
 
     def deploy(self) -> None:
+        """Make the import schema live: import -> production -> backup."""
         st = self.state()
         if st["import_manifest"] is None:
             raise SystemExit(f"nothing in schema {self.s.schema_import} to deploy")
@@ -423,6 +435,7 @@ class Loader:
         )
 
     def revert_deploy(self) -> None:
+        """Undo a deploy: backup -> production -> import."""
         st = self.state()
         m = st["backup_manifest"] or st["production_manifest"]
         if m is None:
@@ -430,6 +443,7 @@ class Loader:
         self.rotate_tables(self.s.schema_backup, self.s.schema, self.s.schema_import, table_names(m))
 
     def remove_backup(self) -> None:
+        """Drop the backup schema's tables."""
         st = self.state()
         m = st["production_manifest"] or st["backup_manifest"]
         if m is None:
@@ -439,50 +453,79 @@ class Loader:
                 cur.execute(f"DROP TABLE IF EXISTS {P.q(self.s.schema_backup)}.{P.q(name)}")
             self.save_state(cur, backup_batch=None, backup_manifest=None)
 
+    def clean(self) -> None:
+        """Delete the outbox batches no schema needs any more."""
+        for b in obsolete_batches(self.ob.batches(), self.state()):
+            log.info(f"deleting batch {b}")
+            self.ob.delete(b)
+
 
 def main(argv: list[str] | None = None) -> None:
+    """Entry point of osm-spark-import-loader."""
     p = argparse.ArgumentParser(prog="osm-spark-import-loader", description=__doc__.split("\n\n")[0])
     p.add_argument(
         "command",
         nargs="?",
         default="apply",
-        choices=["apply", "deploy", "revert-deploy", "remove-backup", "status"],
+        choices=["apply", "deploy", "revert-deploy", "remove-backup", "clean", "status"],
     )
     p.add_argument("--loop", action="store_true", help="apply: keep polling for new batches")
     p.add_argument("--interval", type=int, default=30, help="seconds between polls (--loop)")
     args = p.parse_args(argv)
+    setup_logging()
     s = Settings.from_env()
     loader = Loader(s)
-    if args.command in ("deploy", "revert-deploy", "remove-backup"):
+    if args.command in ("deploy", "revert-deploy", "remove-backup", "clean"):
         with loader.work_lock():
-            return {
+            {
                 "deploy": loader.deploy,
                 "revert-deploy": loader.revert_deploy,
                 "remove-backup": loader.remove_backup,
+                "clean": lambda: None,
             }[args.command]()
+            loader.clean()
+        return
     if args.command == "status":
-        st = loader.state()
-        for k in ("import", "production", "backup"):
-            m = st[f"{k}_manifest"]
-            st[f"{k}_manifest"] = m and {"kind": m["kind"], "sequence": m["sequence"], "rows": m.get("rows")}
-        print(json.dumps(st, indent=2, default=str))
+        print(json.dumps(status(loader.state()), indent=2, default=str))
         return
     loader.exclusive()
-    log(f"namespace {s.namespace}, outbox {s.webhdfs_url}{s.outbox_path}")
+    log.info(f"namespace {s.namespace}, outbox {s.outbox}")
+    failures = 0
     while True:
         try:
+            if failures:
+                loader.connect()
+                loader.exclusive()
             applied = loader.step()
+            if applied:
+                with loader.work_lock():
+                    loader.clean()
+            failures = 0
         except (OSError, psycopg.OperationalError) as e:
             if not args.loop:
                 raise
-            log(f"error: {e}; retrying")
-            applied = False
+            failures += 1
+            delay = min(args.interval * 2 ** (failures - 1), 600)
+            log.warning(f"error: {e}; reconnecting in {delay}s")
+            time.sleep(delay)
+            continue
         if not args.loop:
             if not applied:
-                log("nothing to apply")
+                log.info("nothing to apply")
             return
         if not applied:
             time.sleep(args.interval)
+
+
+def status(st: dict) -> dict:
+    """The loader state for printing: manifests summarized, with the production lag."""
+    out = dict(st)
+    for k in ("import", "production", "backup"):
+        m = out[f"{k}_manifest"]
+        out[f"{k}_manifest"] = m and {"kind": m["kind"], "sequence": m["sequence"], "rows": m.get("rows")}
+    if st["osm_time"] is not None:
+        out["seconds_behind"] = int((dt.datetime.now(dt.timezone.utc) - st["osm_time"]).total_seconds())
+    return out
 
 
 if __name__ == "__main__":

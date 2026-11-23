@@ -3,7 +3,8 @@
 # Spark jobs.
 #
 #   docker compose up -d --build
-#   docker compose run --rm client osm-spark-import import https://download.geofabrik.de/europe/andorra-latest.osm.pbf
+#   docker compose run --rm client osm-spark-import chunk https://download.geofabrik.de/europe/andorra-latest.osm.pbf hdfs://namenode:8020/osm/pbf/andorra
+#   docker compose run --rm client osm-spark-import import hdfs://namenode:8020/osm/pbf/andorra
 #   docker compose logs -f loader                          # snapshot -> schema import
 #   docker compose run --rm client osm-spark-import-loader deploy  # import -> public -> backup
 #   docker compose run --rm client osm-spark-import run           # diffs; the loader applies them to public
@@ -22,7 +23,6 @@ x-env: &env
   OSM_NAMESPACE: "${OSM_NAMESPACE:-andorra}"
   OSM_BUCKETS: "4"
   OSM_REPLICATION_URL: "${OSM_REPLICATION_URL:-https://download.geofabrik.de/europe/andorra-updates/}"
-  OSM_WORK_DIR: /data/work
   OSM_WEBHDFS_URL: http://namenode:9870
   OSM_EXPIRE_DIR: /data/expire
   OSM_EXPIRE_ZOOM: "15"
@@ -98,6 +98,7 @@ services:
   client:
     <<: *spark
     profiles: [client]
+    hostname: client  # spark.driver.host
     depends_on:
       spark-master: { condition: service_started }
       postgis: { condition: service_healthy }

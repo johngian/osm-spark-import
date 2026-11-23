@@ -184,8 +184,17 @@ def test_split_and_decode(tmp_path):
     pbf = tmp_path / "t.osm.pbf"
     write_pbf(pbf)
     whole = pa.Table.from_batches(osm.decode_pbf(pbf.read_bytes()))
-    chunks = osm.split_pbf(str(pbf), str(tmp_path / "chunks"), chunk_bytes=1)  # one blob per chunk
-    parts = pa.concat_tables(pa.Table.from_batches(osm.decode_pbf(open(c, "rb").read())) for c in chunks)
+    chunks = []
+
+    def open_chunk(i):
+        chunks.append(tmp_path / f"chunk-{i}.osm.pbf")
+        return open(chunks[-1], "wb")
+
+    with open(pbf, "rb") as f:
+        header, sizes = osm.split(f, 1, open_chunk)  # one blob per chunk
+    assert len(chunks) == len(sizes) > 1 and [c.stat().st_size for c in chunks] == sizes
+    assert all(c.read_bytes().startswith(header) for c in chunks)
+    parts = pa.concat_tables(pa.Table.from_batches(osm.decode_pbf(c.read_bytes())) for c in chunks)
     assert whole.num_rows == 5002
 
     def key(t):

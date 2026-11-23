@@ -14,13 +14,13 @@ dependencies = [
   "pyarrow>=15",
   "pandas",
   "pyyaml",
-  "requests",
-  "fsspec>=2024.6",
+  "fsspec[http]>=2024.6",
   "psycopg[binary]>=3.2",
 ]
 
 [project.optional-dependencies]
 test = ["pytest"]
+kerberos = ["requests-kerberos"]  # OSM_WEBHDFS_KERBEROS
 dev = ["black==24.10.0", "isort==5.13.2", "ruff==0.8.4"]
 
 [project.scripts]

@@ -1,10 +1,13 @@
 import csv
 import io
 
+import psycopg
 import pyarrow as pa
+import pytest
 from test_osm import DEFAULT_MAPPING
 
-from osm_spark_import.loader import id_expr, table_names, to_csv
+from osm_spark_import import loader
+from osm_spark_import.loader import id_expr, obsolete_batches, table_names, to_csv
 from osm_spark_import.mapping import config, postgis
 from osm_spark_import.mapping.writer import Mapping
 
@@ -62,3 +65,37 @@ def test_default_mapping_ddl():
         'CREATE INDEX "planet_osm_point_geom" ON "import"."planet_osm_point" USING GIST ("way")'
     ]
     assert len(table_names(m)) == 8 + 8
+
+
+def test_obsolete_batches():
+    st = {"import_batch": None, "production_batch": 5, "backup_batch": 3}
+    assert obsolete_batches([1, 2, 3, 4, 5, 6], st) == [1, 2]
+    assert (
+        obsolete_batches([1, 2], {"import_batch": None, "production_batch": None, "backup_batch": None}) == []
+    )
+
+
+def test_loop_reconnects(monkeypatch):
+    events = []
+
+    class FakeLoader:
+        def __init__(self, s):
+            pass
+
+        def connect(self):
+            events.append("connect")
+
+        def exclusive(self):
+            events.append("lock")
+
+        def step(self):
+            events.append("step")
+            if events.count("step") == 1:
+                raise psycopg.OperationalError("server closed the connection")
+            raise SystemExit(0)  # stop the loop
+
+    monkeypatch.setattr(loader, "Loader", FakeLoader)
+    monkeypatch.setattr(loader.time, "sleep", lambda s: None)
+    with pytest.raises(SystemExit):
+        loader.main(["apply", "--loop"])
+    assert events == ["lock", "step", "connect", "lock", "step"]

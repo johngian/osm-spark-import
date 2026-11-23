@@ -2,8 +2,8 @@
 
 One run handles a batch of consecutive sequences:
 
-1. fetch: download the .osc.gz files (pyosmium's ReplicationServer) and
-   decode them with pyosmium.
+1. fetch: download the .osc.gz files (pyosmium's ReplicationServer, which
+   retries) and decode them with pyosmium.
 2. collapse: keep the last version of each element. Every affected element
    is rebuilt from the cache, so the final state of a batch gives the same
    rows as applying its files one by one.
@@ -23,7 +23,9 @@ the partial batch is removed.
 
 from __future__ import annotations
 
+import logging
 import os
+import tempfile
 import time
 
 import osmium
@@ -33,10 +35,15 @@ from osmium.replication.server import ReplicationServer
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
-from osm_spark_import import outbox, pipeline, state, tables
-from osm_spark_import.imports import download, log
+from osm_spark_import import osm, outbox, pipeline, state, tables
 from osm_spark_import.settings import Settings
-from osm_spark_import.spark import Storage, session
+from osm_spark_import.spark import Storage, conf_scope, session
+
+log = logging.getLogger(__name__)
+
+# Dynamic partition pruning fails on some of these plans over Iceberg
+# snapshots ("dynamicpruning ... has not finished", Spark 3.5).
+RUN_CONF = {"spark.sql.optimizer.dynamicPartitionPruning.enabled": "false"}
 
 CHANGE = pa.schema(
     [
@@ -48,14 +55,16 @@ CHANGE = pa.schema(
         ("id", pa.int64()),
         ("lon", pa.int32()),
         ("lat", pa.int32()),
-        ("tags", pa.map_(pa.string(), pa.string())),
+        ("tags", osm.TAGS),
         ("refs", pa.list_(pa.int64())),
-        ("members", pa.list_(pa.struct([("type", pa.string()), ("ref", pa.int64()), ("role", pa.string())]))),
+        ("members", pa.list_(osm.MEMBER)),
     ]
 )
 
 
 class Changes(osmium.SimpleHandler):
+    """Collects the changes of one diff as CHANGE columns."""
+
     def __init__(self, seq: int):
         super().__init__()
         self.seq = seq
@@ -89,22 +98,37 @@ class Changes(osmium.SimpleHandler):
         self.add(r, "r", members=None if r.deleted else [(m.type, m.ref, m.role) for m in r.members])
 
 
-def decode_osc(path: str, seq: int, out: str) -> None:
+def decode_osc(data: bytes, seq: int, out: str) -> None:
+    """Decode a diff (.osc.gz bytes) into a CHANGE Parquet file."""
     h = Changes(seq)
-    h.apply_file(path)
+    h.apply_buffer(data, "osc.gz")
     pq.write_table(pa.Table.from_pydict(h.rows, schema=CHANGE), out)
 
 
 def run(s: Settings, loop: bool = False, max_diffs: int | None = None, until: int | None = None) -> None:
-    s.check_mapping()
-    spark = session(f"osm-spark-import run {s.namespace}")
-    # Dynamic partition pruning fails on some of these plans over Iceberg
-    # snapshots ("dynamicpruning ... has not finished", Spark 3.5).
-    spark.conf.set("spark.sql.optimizer.dynamicPartitionPruning.enabled", "false")
-    fs = Storage(spark)
-    server = ReplicationServer(s.replication_url)
-    max_diffs = max_diffs or s.max_diffs
+    """Apply replication diffs in batches of max_diffs, up to until (or the latest).
 
+    --loop keeps the Spark application alive between batches: for the docker
+    setup; on a shared cluster, schedule single runs instead.
+    """
+    s.load_mapping()  # fail early on a bad mapping
+    spark = session(f"osm-spark-import run {s.namespace}")
+    fs = Storage(spark)
+    with state.locked(spark, fs, s, "run"), ReplicationServer(s.replication_url) as server:
+        with conf_scope(spark, RUN_CONF):
+            apply_diffs(spark, fs, s, server, loop, max_diffs or s.max_diffs, until)
+
+
+def apply_diffs(
+    spark: SparkSession,
+    fs: Storage,
+    s: Settings,
+    server: ReplicationServer,
+    loop: bool,
+    max_diffs: int,
+    until: int | None,
+) -> None:
+    """The batches of run(), under its lock."""
     while True:
         st = state.load(fs, s)
         if st.get("current_run"):
@@ -118,7 +142,7 @@ def run(s: Settings, loop: bool = False, max_diffs: int | None = None, until: in
         latest = info.sequence if until is None else min(info.sequence, until)
         if latest <= st["sequence"]:
             if not loop:
-                log(f"up to date (sequence {st['sequence']})")
+                log.info(f"up to date (sequence {st['sequence']})")
                 return
             time.sleep(60)
             continue
@@ -128,29 +152,26 @@ def run(s: Settings, loop: bool = False, max_diffs: int | None = None, until: in
             return
 
 
-def apply_batch(spark: SparkSession, fs: Storage, s: Settings, st: dict, server, seqs: list[int]) -> None:
+def apply_batch(
+    spark: SparkSession, fs: Storage, s: Settings, st: dict, server: ReplicationServer, seqs: list[int]
+) -> None:
+    """Steps 1-6 of the module docstring for consecutive sequences seqs."""
     mp, mapping_text = s.load_mapping()
     batch = st["batch"] + 1
-    stage = f"{s.storage_root}/staging/{s.namespace}-{batch}"
-    log(f"batch {batch}: sequences {seqs[0]}..{seqs[-1]}")
+    stage = f"{s.staging}/{outbox.batch_name(batch)}"
+    log.info(f"batch {batch}: sequences {seqs[0]}..{seqs[-1]}")
 
     # 1. fetch
-    local = []
     osm_time = None
-    for seq in seqs:
-        url = server.get_diff_url(seq)
-        rel = (
-            url[len(s.replication_url.rstrip("/")) + 1 :]
-            if url.startswith(s.replication_url.rstrip("/"))
-            else str(seq)
-        )
-        osc = download(url, os.path.join(s.work_dir, "diffs", s.namespace, os.path.dirname(rel)))
-        info = server.get_state_info(seq)
-        osm_time = info.timestamp.isoformat() if info else osm_time
-        out = osc[: -len(".osc.gz")] + ".changes.parquet"
-        decode_osc(osc, seq, out)
-        local.append(out)
-    fs.put_files(local, stage + "/changes")
+    with tempfile.TemporaryDirectory() as tmp:
+        local = []
+        for seq in seqs:
+            log.info(f"GET {server.get_diff_url(seq)}")
+            decode_osc(server.get_diff_block(seq), seq, os.path.join(tmp, f"{seq:012d}.parquet"))
+            info = server.get_state_info(seq)
+            osm_time = info.timestamp.isoformat() if info else osm_time
+            local.append(os.path.join(tmp, f"{seq:012d}.parquet"))
+        fs.put_files(local, stage + "/changes")
 
     # 2. collapse
     last = Window.partitionBy("k", "id").orderBy(F.desc("version"), F.desc("seq"), F.desc("pos"))
@@ -217,10 +238,9 @@ def apply_batch(spark: SparkSession, fs: Storage, s: Settings, st: dict, server,
 
     # 5a. old versions: tiles to expire
     changed = {"n": nodes_changed, "w": ways_changed, "r": rels_changed}
-    (
-        pipeline.build(spark, s, units(old, changed), mapping_text, s.expire_zoom, deleter_expire=True)
-        .write.mode("overwrite")
-        .parquet(stage + "/old")
+    pipeline.write_rows(
+        pipeline.build(spark, s, units(old, changed), mapping_text, s.expire_zoom, deleter_expire=True),
+        stage + "/old",
     )
 
     # 4. merge
@@ -228,9 +248,7 @@ def apply_batch(spark: SparkSession, fs: Storage, s: Settings, st: dict, server,
 
     # 5b. new versions: rows and tiles to expire
     new = {name: spark.table(s.table(name)) for name in ("nodes", "ways", "relations")}
-    pipeline.build(spark, s, units(new), mapping_text, s.expire_zoom).write.mode("overwrite").parquet(
-        stage + "/rows"
-    )
+    pipeline.write_rows(pipeline.build(spark, s, units(new), mapping_text, s.expire_zoom), stage + "/rows")
 
     # 6. delta batch
     deletes = (
@@ -239,11 +257,11 @@ def apply_batch(spark: SparkSession, fs: Storage, s: Settings, st: dict, server,
         .unionByName(aff["ways"].select(F.lit("w").alias("kind"), "id"))
         .unionByName(aff["rels"].select(F.lit("r").alias("kind"), "id"))
     )
-    rows = spark.read.parquet(stage + "/rows").unionByName(spark.read.parquet(stage + "/old"))
+    rows = pipeline.read_rows(spark, stage + "/rows").unionByName(pipeline.read_rows(spark, stage + "/old"))
     manifest = pipeline.write_batch(
         spark, fs, s, mp, batch, "delta", st["batch"], rows, deletes, seqs[-1], osm_time
     )
-    log(
+    log.info(
         f"batch {batch}: {manifest['deletes']} elements to delete, {sum(manifest['rows'].values())} rows "
         f"to insert, {manifest['tiles']} tiles to expire"
     )
@@ -251,6 +269,7 @@ def apply_batch(spark: SparkSession, fs: Storage, s: Settings, st: dict, server,
 
 
 def finish(fs: Storage, s: Settings, st: dict) -> None:
+    """Record the current run as done and remove its staging directory."""
     cr = st["current_run"]
     st.update(batch=cr["batch"], sequence=cr["seqs"][-1], osm_time=cr["time"], current_run=None)
     state.save(fs, s, st)
@@ -258,14 +277,15 @@ def finish(fs: Storage, s: Settings, st: dict) -> None:
 
 
 def recover(spark: SparkSession, fs: Storage, s: Settings, st: dict) -> None:
+    """Finish or roll back an interrupted run (see the module docstring)."""
     cr = st["current_run"]
     if cr["kind"] != "delta":
         raise SystemExit("an import was interrupted: run `osm-spark-import import` (or `rebuild`) again")
     if fs.exists(f"{outbox.batch_dir(s.outbox, cr['batch'])}/{outbox.MANIFEST}"):
-        log(f"batch {cr['batch']} was complete; finishing it")
+        log.info(f"batch {cr['batch']} was complete; finishing it")
         finish(fs, s, st)
         return
-    log(f"batch {cr['batch']} was interrupted; rolling back the cache")
+    log.info(f"batch {cr['batch']} was interrupted; rolling back the cache")
     tables.rollback(spark, s, cr["snapshots"])
     fs.delete(outbox.batch_dir(s.outbox, cr["batch"]))
     fs.delete(cr["stage"])
@@ -286,87 +306,67 @@ def pair_delta(old_pairs: DataFrame, new_pairs: DataFrame, keys: list[str]) -> D
     )
 
 
-def merge_into(spark: SparkSession, s: Settings, src: DataFrame, table: str, sql: str) -> None:
-    view = f"src_{table}"
-    src.createOrReplaceTempView(view)
-    spark.sql(sql.format(t=s.table(table), s=view))
+INDEX_KEYS = {
+    "way_nodes": ["node_id", "way_id"],
+    "rel_members": ["member_type", "member_id", "rel_id"],
+}
+
+
+def merge_elements(
+    spark: SparkSession, s: Settings, src: DataFrame, table: str, cols: tuple[str, ...]
+) -> None:
+    """MERGE collapsed changes into an element table: a = 'd' deletes, anything else upserts."""
+    src.createOrReplaceTempView(f"src_{table}")
+    sets = ", ".join(f"t.{c} = s.{c}" for c in cols)
+    names = ", ".join(cols)
+    values = ", ".join(f"s.{c}" for c in cols)
+    spark.sql(
+        f"""
+        MERGE INTO {s.table(table)} t USING src_{table} s ON t.id = s.id
+        WHEN MATCHED AND s.a = 'd' THEN DELETE
+        WHEN MATCHED THEN UPDATE SET {sets}
+        WHEN NOT MATCHED AND s.a != 'd' THEN INSERT (id, {names}) VALUES (s.id, {values})"""
+    )
+
+
+def merge_pairs(spark: SparkSession, s: Settings, src: DataFrame, table: str, keys: list[str]) -> None:
+    """MERGE pair_delta output into an index table."""
+    src.createOrReplaceTempView(f"src_{table}")
+    on = " AND ".join(f"t.{k} = s.{k}" for k in keys)
+    names = ", ".join(keys)
+    values = ", ".join(f"s.{k}" for k in keys)
+    spark.sql(
+        f"""
+        MERGE INTO {s.table(table)} t USING src_{table} s ON {on}
+        WHEN MATCHED AND s.op = 'd' THEN DELETE
+        WHEN NOT MATCHED AND s.op = 'i' THEN INSERT ({names}) VALUES ({values})"""
+    )
 
 
 def merge_cache(spark: SparkSession, s: Settings, final: DataFrame, old: dict, stage: str) -> None:
+    """Apply collapsed changes to the cache and index tables (one Iceberg commit each)."""
     ways = final.filter("k = 'w'")
     rels = final.filter("k = 'r'")
-    # read the old tables before changing them
+    # staged first: the index deltas read the old tables before they change
     src = {
-        "nodes": final.filter("k = 'n'").select("id", "a", "lon", "lat", "tags"),
-        "ways": ways.select("id", "a", "tags", "refs"),
-        "relations": rels.select("id", "a", "tags", "members"),
-        "way_nodes": pair_delta(
-            tables.way_nodes(old["ways"].join(ways.select("id"), "id", "left_semi")),
-            tables.way_nodes(ways.filter("a != 'd'")),
-            ["node_id", "way_id"],
-        ),
-        "rel_members": pair_delta(
-            tables.rel_members(old["relations"].join(rels.select("id"), "id", "left_semi")),
-            tables.rel_members(rels.filter("a != 'd'")),
-            ["member_type", "member_id", "rel_id"],
-        ),
+        name: final.filter(F.col("k") == k).select("id", "a", *cols)
+        for name, (k, cols) in tables.ELEMENTS.items()
     }
+    src["way_nodes"] = pair_delta(
+        tables.way_nodes(old["ways"].join(ways.select("id"), "id", "left_semi")),
+        tables.way_nodes(ways.filter("a != 'd'")),
+        INDEX_KEYS["way_nodes"],
+    )
+    src["rel_members"] = pair_delta(
+        tables.rel_members(old["relations"].join(rels.select("id"), "id", "left_semi")),
+        tables.rel_members(rels.filter("a != 'd'")),
+        INDEX_KEYS["rel_members"],
+    )
     for name, df in src.items():
         df.write.mode("overwrite").parquet(f"{stage}/merge_{name}")
     src = {name: spark.read.parquet(f"{stage}/merge_{name}") for name in src}
 
-    merge_into(
-        spark,
-        s,
-        src["nodes"],
-        "nodes",
-        """
-        MERGE INTO {t} t USING {s} s ON t.id = s.id
-        WHEN MATCHED AND s.a = 'd' THEN DELETE
-        WHEN MATCHED THEN UPDATE SET t.lon = s.lon, t.lat = s.lat, t.tags = s.tags
-        WHEN NOT MATCHED AND s.a != 'd' THEN INSERT (id, lon, lat, tags) VALUES (s.id, s.lon, s.lat, s.tags)""",
-    )
-    merge_into(
-        spark,
-        s,
-        src["ways"],
-        "ways",
-        """
-        MERGE INTO {t} t USING {s} s ON t.id = s.id
-        WHEN MATCHED AND s.a = 'd' THEN DELETE
-        WHEN MATCHED THEN UPDATE SET t.tags = s.tags, t.refs = s.refs
-        WHEN NOT MATCHED AND s.a != 'd' THEN INSERT (id, tags, refs) VALUES (s.id, s.tags, s.refs)""",
-    )
-    merge_into(
-        spark,
-        s,
-        src["relations"],
-        "relations",
-        """
-        MERGE INTO {t} t USING {s} s ON t.id = s.id
-        WHEN MATCHED AND s.a = 'd' THEN DELETE
-        WHEN MATCHED THEN UPDATE SET t.tags = s.tags, t.members = s.members
-        WHEN NOT MATCHED AND s.a != 'd' THEN INSERT (id, tags, members) VALUES (s.id, s.tags, s.members)""",
-    )
-    merge_into(
-        spark,
-        s,
-        src["way_nodes"],
-        "way_nodes",
-        """
-        MERGE INTO {t} t USING {s} s ON t.node_id = s.node_id AND t.way_id = s.way_id
-        WHEN MATCHED AND s.op = 'd' THEN DELETE
-        WHEN NOT MATCHED AND s.op = 'i' THEN INSERT (node_id, way_id) VALUES (s.node_id, s.way_id)""",
-    )
-    merge_into(
-        spark,
-        s,
-        src["rel_members"],
-        "rel_members",
-        """
-        MERGE INTO {t} t USING {s} s
-          ON t.member_type = s.member_type AND t.member_id = s.member_id AND t.rel_id = s.rel_id
-        WHEN MATCHED AND s.op = 'd' THEN DELETE
-        WHEN NOT MATCHED AND s.op = 'i' THEN INSERT (member_type, member_id, rel_id)
-          VALUES (s.member_type, s.member_id, s.rel_id)""",
-    )
+    for name, (_, cols) in tables.ELEMENTS.items():
+        merge_elements(spark, s, src[name], name, cols)
+    for name, keys in INDEX_KEYS.items():
+        merge_pairs(spark, s, src[name], name, keys)

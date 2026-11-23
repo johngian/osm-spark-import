@@ -6,14 +6,13 @@ import datetime as dt
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import StructField, StructType, _parse_datatype_string
 
 from osm_spark_import import osm, outbox
 from osm_spark_import.mapping.columns import VALUE_TYPES
 from osm_spark_import.settings import Settings
-from osm_spark_import.spark import Storage
+from osm_spark_import.spark import Storage, conf_scope
 
-CHUNK_MB = 32  # default; OSM_CHUNK_MB
+# Spark versions of osm.ELEMENT and osm.ROW
 ELEMENT_SCHEMA = (
     "k string, id bigint, lon int, lat int, tags map<string,string>, refs array<bigint>, "
     "members array<struct<type:string,ref:bigint,role:string>>"
@@ -22,16 +21,26 @@ ROW_SCHEMA = "tbl string, id bigint, g boolean, vals string, geom binary, tile s
 
 
 def partitions(spark: SparkSession, s: Settings) -> int:
-    return s.partitions or spark.sparkContext.defaultParallelism
+    """OSM_PARTITIONS, or spark.sql.shuffle.partitions (not the executors present right now,
+    which dynamic allocation makes arbitrary)."""
+    return s.partitions or int(spark.conf.get("spark.sql.shuffle.partitions"))
 
 
-def decode_pbf_chunks(spark: SparkSession, chunks_dir: str, chunk_mb: int = CHUNK_MB) -> DataFrame:
-    """Decode the PBF chunks in a storage directory with pyosmium, one chunk per task."""
-    size = str((chunk_mb + 8) << 20)
-    spark.conf.set("spark.sql.files.maxPartitionBytes", size)
-    spark.conf.set("spark.sql.files.openCostInBytes", size)
-    raw = spark.read.format("binaryFile").load(chunks_dir).select("content")
-    return raw.mapInArrow(osm.decode_chunks, ELEMENT_SCHEMA)
+def decode_chunks_to(spark: SparkSession, chunks_dir: str, max_chunk_bytes: int, out: str) -> None:
+    """Decode the PBF chunks of a directory with pyosmium, one chunk per task, into Parquet."""
+    size = str(max_chunk_bytes + (8 << 20))
+    with conf_scope(
+        spark, {"spark.sql.files.maxPartitionBytes": size, "spark.sql.files.openCostInBytes": size}
+    ):
+        (
+            spark.read.format("binaryFile")
+            .option("pathGlobFilter", "*.osm.pbf")
+            .load(chunks_dir)
+            .select("content")
+            .mapInArrow(osm.decode_chunks, ELEMENT_SCHEMA)
+            .write.mode("overwrite")
+            .parquet(out)
+        )
 
 
 def has_key(keys: list[str] | None):
@@ -43,6 +52,7 @@ def has_key(keys: list[str] | None):
 
 
 def select_targets(df: DataFrame, ids: DataFrame | None) -> DataFrame:
+    """The rows of df whose id is in ids (all of them for None)."""
     return df if ids is None else df.join(ids.select("id").distinct(), "id", "left_semi")
 
 
@@ -187,20 +197,37 @@ def build(
     expire_zoom: int = 0,
     deleter_expire: bool = False,
 ) -> DataFrame:
-    """Rows (tbl, id, g, vals, geom) and expired tiles (tile) of the work units."""
-    fn = osm.make_build_fn(mapping_text, s.srid, expire_zoom, deleter_expire)
-    return units.repartition(partitions(spark, s)).mapInArrow(fn, ROW_SCHEMA)
+    """Rows (tbl, id, g, vals, geom) and expired tiles (tile) of the work units.
+
+    Units with more than OSM_BIG_UNIT_NODES coordinates (large relations) are
+    spread over their own partitions and built one at a time, apart from the
+    others; both branches share the work units' shuffles (exchange reuse).
+    """
+    n = partitions(spark, s)
+    big = F.greatest(F.size("nodes"), F.lit(0)) > s.big_unit_nodes
+    small_fn = osm.make_build_fn(mapping_text, s.srid, expire_zoom, deleter_expire)
+    big_fn = osm.make_build_fn(
+        mapping_text, s.srid, expire_zoom, deleter_expire, batch_units=1, big_unit_nodes=s.big_unit_nodes
+    )
+    small_rows = units.filter(~big).repartition(n).mapInArrow(small_fn, ROW_SCHEMA)
+    big_rows = units.filter(big).repartition(n).mapInArrow(big_fn, ROW_SCHEMA)
+    return small_rows.unionByName(big_rows)
 
 
-def table_schema(spec: dict) -> StructType:
-    """Spark types of the non-geometry columns of a table spec."""
+def write_rows(rows: DataFrame, path: str) -> None:
+    """Stage built rows, partitioned by table so each table is read apart."""
+    rows.write.mode("overwrite").partitionBy("tbl").parquet(path)
 
-    return StructType(
-        [
-            StructField(c["name"], _parse_datatype_string(VALUE_TYPES[c["value_type"]][1]))
-            for c in spec["columns"]
-            if c["pg"] != "GEOMETRY"
-        ]
+
+def read_rows(spark: SparkSession, path: str) -> DataFrame:
+    """Rows staged by write_rows (the schema is given: an empty stage has no files)."""
+    return spark.read.schema(ROW_SCHEMA).parquet(path)
+
+
+def table_schema(spec: dict) -> str:
+    """DDL schema of the non-geometry columns of a table spec."""
+    return ", ".join(
+        f"`{c['name']}` {VALUE_TYPES[c['value_type']][1]}" for c in spec["columns"] if c["pg"] != "GEOMETRY"
     )
 
 
@@ -219,7 +246,7 @@ def write_batch(
 ) -> dict:
     """Write an outbox batch: Parquet per table (columns in mapping order,
     plus __id and __gen for the generalized tables), deletes, expired tiles,
-    then the manifest. rows should be materialized: it is read per table."""
+    then the manifest. rows should be staged with write_rows: each table reads its partition."""
     path = outbox.batch_dir(s.outbox, batch)
     fs.delete(path)
     spec = mp.manifest()
@@ -254,7 +281,7 @@ def write_batch(
         "namespace": s.namespace,
         "sequence": sequence,
         "osm_time": osm_time,
-        "created": dt.datetime.now(dt.UTC).isoformat(),
+        "created": dt.datetime.now(dt.timezone.utc).isoformat(),
         "deletes": n_deletes,
         "tiles": n_tiles,
         "rows": counts,
