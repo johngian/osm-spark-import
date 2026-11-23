@@ -70,6 +70,11 @@ class TileList:
             self.expire(*nodes[0])
             return
         candidates = list(mercantile.tiles(*bbox, [zoom]))
+        if not candidates:  # a flat box on a tile edge: the tiles of its nodes
+            self.tiles.update(
+                (t.x, t.y, t.z) for t in (mercantile.tile(lon, lat, zoom) for lon, lat in nodes)
+            )
+            return
         bounds = np.array([mercantile.bounds(t) for t in candidates])
         hit = shapely.intersects(shapely.box(*bounds.T), shapely.LineString(nodes))
         self.tiles.update((t.x, t.y, t.z) for t, h in zip(candidates, hit, strict=True) if h)

@@ -54,3 +54,9 @@ def test_tile_list_expire_nodes_adaptive(nodes, expected_num, expected_level, cl
     for line in lines:
         assert re.fullmatch(r"\d+/\d+/\d+", line), line
     assert len(lines) == expected_num
+
+
+def test_flat_line_on_a_tile_edge():
+    tl = TileList(14)
+    tl.expire_nodes([(0.0001, 0.0), (0.0003, 0.0)], False)  # on the equator
+    assert tl.as_strings() == ["14/8192/8192"]
