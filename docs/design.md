@@ -167,6 +167,7 @@ three days.
 | Check | Result |
 |---|---|
 | unit tests (mapping file, filters, matchers, columns, geometries, multipolygons, tile lists, chunking, settings, SQL, CSV, loader) | pass |
+| Spark tests, local mode with Iceberg: chunk → import → a diff, compared with a fresh import of the newer data (cache tables, point and line rows; big-unit path on one side); a run crashing after the merge rolled back; lock; maintenance | pass |
 | Andorra 2026-11-10 imported, diffs 4964–4967 applied, compared with Andorra 2026-11-13 imported (`osm-spark-import-compare`) | all 16 tables of the default mapping identical |
 | a diff run killed while merging the cache, then run again | rolled back and redone; same tables |
 | Luxembourg import (1.3 M rows, default mapping) | completes; 78 s on the local cluster |

@@ -98,9 +98,14 @@ fails until `unlock`.
 
 Unit tests run in the image build: mapping file, filters,
 matchers, column values, geometries and multipolygons, tile lists, chunking,
-settings, SQL, CSV for COPY, loader:
+settings, SQL, CSV for COPY, loader. `tests/test_spark_pipeline.py` runs the
+Spark side in local mode with an Iceberg catalog in a temporary directory
+(chunk, import, diffs against a fresh import, crash recovery, lock,
+maintenance); it needs Java and the Iceberg runtime JAR, and is skipped
+without them:
 
 ```sh
+OSM_TEST_ICEBERG_JAR=/path/to/iceberg-spark-runtime-3.5_2.12-1.6.1.jar python -m pytest tests
 docker compose run --rm client sh -c 'cd /opt/osm-spark-import && python -m pytest tests'
 ```
 

@@ -55,3 +55,6 @@ ignore = ["E501"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
+
+[tool.pytest.ini_options]
+markers = ["spark: needs Java and the Iceberg runtime JAR (OSM_TEST_ICEBERG_JAR)"]
