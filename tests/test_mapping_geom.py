@@ -174,6 +174,23 @@ def test_gap_closed():
     assert shapely.is_valid(g) and abs(g.area - 100) < 1
 
 
+def test_gaps_between_ways_not_closed():
+    # only the two ends of a merged ring are joined
+    w1 = way(1, [(1, 0, 0), (2, 10, 0), (3, 10, 10)])
+    w2 = way(2, [(4, 10, 10.05), (5, 0, 10), (6, 0, 0.05)])
+    with pytest.raises(GeomError):
+        build(w1, w2)
+
+
+def test_close_rings_not_snapped():
+    # a ring 0.05 from another keeps its shape
+    w1 = way(1, SQUARE_10)
+    w2 = way(2, [(5, 10.05, 0.5), (6, 20, 0.5), (7, 20, 9.5), (8, 10.05, 9.5), (5, 10.05, 0.5)])
+    g = build(w1, w2)
+    assert shapely.get_num_geometries(g) == 2
+    assert shapely.equals(g, shapely.union(shapely.Polygon(w1), shapely.Polygon(w2)))
+
+
 def test_linestring():
     assert shapely.get_num_coordinates(linestring([(0, 0), (0, 0), (1, 1)])) == 2
     with pytest.raises(GeomError):

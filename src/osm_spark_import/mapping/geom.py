@@ -4,8 +4,8 @@
 Coordinates are pyosmium's fixed-point values (1e-7 degrees), projected with
 pyproj. Lines and polygons drop repeated points; polygons are normalized and
 repaired with buffer(0) if invalid; multipolygons are the member ways merged
-into rings (after snapping gaps) and combined with the even-odd rule. Errors make
-the writer skip the element.
+into rings (closing small gaps between ring ends) and combined with the even-odd
+rule. Errors make the writer skip the element.
 """
 
 from __future__ import annotations
@@ -88,18 +88,27 @@ def make_valid(g):
 
 
 def multipolygon(member_ways: list[list[tuple[float, float]]], max_gap: float):
-    """The area formed by the member ways: gaps below max_gap closed, ways
-    merged into rings, rings combined with the even-odd rule (an inner ring
-    touching the outer ring leaves a notch)."""
-    lines = [shapely.LineString(pts) for pts in member_ways if len(pts) >= 2]
-    if not lines:
-        raise GeomError("no member ways")
+    """The area formed by the member ways: open ways merged end to end, a merged
+    ring with ends closer than max_gap closed (coordinates are not moved
+    otherwise), rings combined with the even-odd rule (an inner ring touching the
+    outer ring leaves a notch)."""
+    rings, open_lines = [], []
+    for pts in member_ways:
+        if len(pts) < 2:
+            continue
+        line = shapely.LineString(pts)
+        (rings if shapely.is_closed(line) else open_lines).append(line)
     try:
-        work = shapely.MultiLineString(lines)
-        if max_gap > 0:
-            work = shapely.snap(work, work, max_gap)
-        merged = shapely.get_parts(shapely.line_merge(work))
-        rings = [r for r in merged if shapely.is_closed(r) and shapely.get_num_coordinates(r) >= 4]
+        # closed ways stay out of the merge: a third line at a node stops it there
+        if open_lines:
+            for line in shapely.get_parts(shapely.line_merge(shapely.MultiLineString(open_lines))):
+                pts = shapely.get_coordinates(line)
+                if not shapely.is_closed(line) and len(pts) >= 4 and np.hypot(*(pts[0] - pts[-1])) < max_gap:
+                    pts[-1] = pts[0]
+                    line = shapely.LineString(pts)
+                if shapely.is_closed(line):
+                    rings.append(line)
+        rings = [r for r in rings if shapely.get_num_coordinates(r) >= 4]
         if not rings:
             raise GeomError("member ways do not form a ring")
         area = reduce(shapely.symmetric_difference, (make_valid(shapely.Polygon(r)) for r in rings))
